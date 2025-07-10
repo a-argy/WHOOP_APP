@@ -4,144 +4,58 @@ const passport = require('passport');
 const OAuth2Strategy = require('passport-oauth2').Strategy;
 const session = require('express-session');
 const crypto = require('crypto');
+const { validateWebhookSignature } = require('./utils/webhook');
+const { sendToFoundry } = require('./utils/foundry');
+const { checkAndRefresh, fetchWorkoutData, fetchSleepData, fetchRecoveryData } = require('./utils/whoop');
 
 const app = express();
-
-// Foundry Configuration
-const FOUNDRY_TOKEN = process.env.FOUNDRY_TOKEN;
-
-// Helper function to send data to Foundry
-async function sendToFoundry(valueType, payloadData) {
-    try {
-        // Create record matching the new schema: timestamp, value, payload
-        const record = {
-            timestamp: new Date().toISOString(),
-            value: valueType,
-            payload: JSON.stringify(payloadData)
-        };
-
-        const sampleData = [record];
-        const postUri = "https://anthonyargy.usw-3.palantirfoundry.com/api/v2/highScale/streams/datasets/ri.foundry.main.dataset.5ba02526-46c3-4a86-85e5-13bc5fd70216/streams/master/publishRecords?preview=true";
-
-        console.log('Sending to Foundry:', record);
-
-        // We use fetch to create a post request with an array of streaming rows
-        const response = await fetch(postUri, {
-            method: 'POST',
-            headers: {
-                Authorization: "Bearer " + FOUNDRY_TOKEN,
-                "Content-Type": "application/json",
-            },
-            body: JSON.stringify({ records: sampleData })
-        });
-
-        // Check if the request was successful
-        if (!response.ok) {
-            const errorText = await response.text().catch(() => 'No error text');
-            throw new Error(`Foundry API error: ${response.status} - ${errorText}`);
-        }
-    
-        // Log success and return
-        console.log('Successfully sent data to Foundry');
-        return true;
-    } catch (error) {
-        console.error('Error sending data to Foundry:', error);
-        throw error;
-    }
-}
-
 // Add body parser middleware for webhook JSON
 app.use(express.json());
-
-// Environment variables (you should set these in a .env file)
-const WHOOP_API_HOSTNAME = process.env.WHOOP_API_HOSTNAME || 'https://api.prod.whoop.com';
-const CLIENT_ID = process.env.CLIENT_ID || 'your_client_id';
-const CLIENT_SECRET = process.env.CLIENT_SECRET || 'your_client_secret';
-const CALLBACK_URL = process.env.CALLBACK_URL || 'http://localhost:3000/callback';
-
-// Store recent workouts in memory (in production, use a proper database)
-const recentWorkouts = new Map();
-
-// Store connected SSE clients
-const clients = new Set();
 
 // Store user tokens (in production, use a proper database)
 const userTokens = new Map();
 
-// Webhook signature validation
-function validateWebhookSignature(timestamp, rawBody, signature) {
-  const calculatedSignature = crypto
-    .createHmac('sha256', CLIENT_SECRET)
-    .update(timestamp + rawBody)
-    .digest('base64');
-  
-  return calculatedSignature === signature;
-}
-
-// Token refresh function
-async function refreshAccessToken(refreshToken) {
-  try {
-    const response = await fetch(`${WHOOP_API_HOSTNAME}/oauth/oauth2/token`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/x-www-form-urlencoded',
-      },
-      body: new URLSearchParams({
-        grant_type: 'refresh_token',
-        refresh_token: refreshToken,
-      client_id: CLIENT_ID,
-      client_secret: CLIENT_SECRET,
-        scope: 'offline'
-      })
-    });
-
-    if (!response.ok) {
-      throw new Error(`Token refresh failed: ${response.status}`);
-    }
-
-    const data = await response.json();
-    return {
-      accessToken: data.access_token,
-      refreshToken: data.refresh_token,
-      expiresIn: data.expires_in
-    };
-  } catch (error) {
-    console.error('Token refresh error:', error);
-    throw error;
-  }
-}
+// Set environment variables in .env file
+const WHOOP_API_HOSTNAME = process.env.WHOOP_API_HOSTNAME || 'https://api.prod.whoop.com';
+const CALLBACK_URL = process.env.CALLBACK_URL || 'http://localhost:8080/callback';
+const CLIENT_ID = process.env.CLIENT_ID;
+const CLIENT_SECRET = process.env.CLIENT_SECRET;
 
 // Webhook endpoint
 app.post('/webhook', async (req, res) => {
   const signature = req.headers['x-whoop-signature'];
   const timestamp = req.headers['x-whoop-signature-timestamp'];
-  const rawBody = JSON.stringify(req.body);
 
   // Validate webhook signature
-  if (!validateWebhookSignature(timestamp, rawBody, signature)) {
+  if (!validateWebhookSignature(timestamp, req.body, signature)) {
     console.error('Invalid webhook signature');
     return res.status(401).json({ error: 'Invalid signature' });
   }
 
-  const { type, user_id, id } = req.body;
+  const { type, user_id, id, score_state } = req.body;
+
+  // Check if token needs refresh
+  const accessToken = await checkAndRefresh(user_id, userTokens);
 
   // Handle different webhook event types
   switch (type) {
     case 'workout.updated':
       try {
-        // Send workout webhook data directly to Foundry
+        // Fetch workout data from WHOOP API
+        const workoutData = await fetchWorkoutData(id, accessToken);
+
+        // Send workout data to Foundry
         await sendToFoundry("workout", {
-          type: type,
+          ...workoutData,
           user_id: user_id,
-          workout_id: id,
-          received_at: new Date().toISOString()
+          webhook_received_at: new Date().toISOString()
         });
         
         // Log the workout details
-        console.log('New workout update received:');
+        console.log('New workout update received and data fetched:');
         console.log('User ID:', user_id);
         console.log('Workout ID:', id);
-        console.log('Webhook Type:', type);
+        console.log('Workout Data:', JSON.stringify(workoutData, null, 2));
         console.log('-------------------');
 
         res.status(200).json({ message: 'Workout update processed successfully' });
@@ -165,16 +79,108 @@ app.post('/webhook', async (req, res) => {
         console.log('User ID:', user_id);
         console.log('Deleted Workout ID:', id);
         console.log('-------------------');
-        
-        // Remove from recent workouts if we were storing it
-        if (recentWorkouts.has(id)) {
-          recentWorkouts.delete(id);
-        }
+    
         
         res.status(200).json({ message: 'Workout deletion processed successfully' });
       } catch (error) {
         console.error('Error processing workout deletion:', error);
         res.status(500).json({ error: 'Failed to process workout deletion' });
+      }
+      break;
+
+    case 'sleep.updated':
+      try {
+        // Fetch sleep data from WHOOP API
+        const sleepData = await fetchSleepData(id, accessToken);
+
+        // Send sleep data to Foundry
+        await sendToFoundry("sleep", {
+          ...sleepData,
+          user_id: user_id,
+          webhook_received_at: new Date().toISOString()
+        });
+        
+        // Log the sleep details
+        console.log('New sleep update received and data fetched:');
+        console.log('User ID:', user_id);
+        console.log('Sleep ID:', id);
+        console.log('Sleep Data:', JSON.stringify(sleepData, null, 2));
+        console.log('-------------------');
+
+        res.status(200).json({ message: 'Sleep update processed successfully' });
+      } catch (error) {
+        console.error('Error processing sleep update webhook:', error);
+        res.status(500).json({ error: 'Failed to process sleep update' });
+      }
+      break;
+
+    case 'sleep.deleted':
+      try {
+        // Send deletion event to Foundry
+        await sendToFoundry("sleep_deleted", { 
+          sleep_id: id,
+          user_id: user_id,
+          deleted_at: new Date().toISOString()
+        });
+
+        // Log the deletion event without trying to fetch the sleep data
+        console.log('Sleep deletion notification received:');
+        console.log('User ID:', user_id);
+        console.log('Deleted Sleep ID:', id);
+        console.log('-------------------');
+        
+        res.status(200).json({ message: 'Sleep deletion processed successfully' });
+      } catch (error) {
+        console.error('Error processing sleep deletion:', error);
+        res.status(500).json({ error: 'Failed to process sleep deletion' });
+      }
+      break;
+
+    case 'recovery.updated':
+      try {
+        // Fetch recovery data from WHOOP API
+        const recoveryData = await fetchRecoveryData(id, accessToken);
+
+        // Send recovery data to Foundry
+        await sendToFoundry("recovery", {
+          ...recoveryData,
+          user_id: user_id,
+          webhook_received_at: new Date().toISOString()
+        });
+        
+        // Log the recovery details
+        console.log('New recovery update received and data fetched:');
+        console.log('User ID:', user_id);
+        console.log('Cycle ID:', id);
+        console.log('Recovery Data:', JSON.stringify(recoveryData, null, 2));
+        console.log('-------------------');
+
+        res.status(200).json({ message: 'Recovery update processed successfully' });
+      } catch (error) {
+        console.error('Error processing recovery update webhook:', error);
+        res.status(500).json({ error: 'Failed to process recovery update' });
+      }
+      break;
+
+    case 'recovery.deleted':
+      try {
+        // Send deletion event to Foundry
+        await sendToFoundry("recovery_deleted", { 
+          cycle_id: id,
+          user_id: user_id,
+          deleted_at: new Date().toISOString()
+        });
+
+        // Log the deletion event without trying to fetch the recovery data
+        console.log('Recovery deletion notification received:');
+        console.log('User ID:', user_id);
+        console.log('Deleted Cycle ID:', id);
+        console.log('-------------------');
+        
+        res.status(200).json({ message: 'Recovery deletion processed successfully' });
+      } catch (error) {
+        console.error('Error processing recovery deletion:', error);
+        res.status(500).json({ error: 'Failed to process recovery deletion' });
       }
       break;
 
@@ -213,6 +219,7 @@ const whoopOAuthConfig = {
     'read:recovery',
     'read:cycles',
     'read:workout',
+    'read:sleep',
     'read:body_measurement'
   ],
 };
@@ -388,7 +395,6 @@ app.get('/', (req, res) => {
       </style>
       <script>
         let pollingInterval;
-        let foundryInterval;
         
         async function fetchWhoopData(endpoint) {
           const loadingEl = document.querySelector('.loading');
@@ -438,18 +444,9 @@ app.get('/', (req, res) => {
         }
 
         async function sendStrainToFoundry() {
-          try {
-            const data = await updateStrainDisplay();
-            await fetch('/send-strain-to-foundry', {
-              method: 'POST',
-              headers: {
-                'Content-Type': 'application/json'
-              },
-              body: JSON.stringify(data)
-            });
-          } catch (error) {
-            console.error('Error sending strain to Foundry:', error);
-          }
+          // This function is no longer needed since /current-strain automatically sends to Foundry
+          // Just call updateStrainDisplay which will trigger the Foundry send
+          await updateStrainDisplay();
         }
 
         function toggleStrainPolling() {
@@ -457,17 +454,13 @@ app.get('/', (req, res) => {
           if (pollingInterval) {
             // Stop polling
             clearInterval(pollingInterval);
-            clearInterval(foundryInterval);
             pollingInterval = null;
-            foundryInterval = null;
             button.textContent = 'Start Strain Polling';
             button.classList.remove('active');
           } else {
             // Start polling
-            updateStrainDisplay(); // Initial update
-            sendStrainToFoundry(); // Initial Foundry update
-            pollingInterval = setInterval(updateStrainDisplay, 60000); // Update display every minute
-            foundryInterval = setInterval(sendStrainToFoundry, 900000); // Send to Foundry every 15 minutes
+            updateStrainDisplay(); // Initial update (automatically sends to Foundry)
+            pollingInterval = setInterval(updateStrainDisplay, 60000); // Update display every minute (automatically sends to Foundry)
             button.textContent = 'Stop Strain Polling';
             button.classList.add('active');
           }
@@ -520,27 +513,6 @@ app.get('/profile', (req, res) => {
     message: 'Protected profile data',
     user: req.user
   });
-});
-
-// Example route to make WHOOP API calls
-app.get('/whoop-data', async (req, res) => {
-  if (!req.user) {
-    return res.status(401).json({ error: 'Not authenticated' });
-  }
-
-  try {
-    const response = await makeWhoopApiCall('/developer/v1/user/profile/basic', req.user);
-    
-    if (!response.ok) {
-      throw new Error(`WHOOP API error: ${response.status}`);
-    }
-
-    const data = await response.json();
-    res.json(data);
-  } catch (error) {
-    console.error('Error fetching WHOOP data:', error);
-    res.status(500).json({ error: 'Failed to fetch WHOOP data' });
-  }
 });
 
 // Body stats route
@@ -597,7 +569,7 @@ app.get('/current-strain', async (req, res) => {
     // Return the most recent cycle's strain data
     if (data.records && data.records.length > 0) {
       const currentCycle = data.records[0];
-      res.json({
+      const strainData = {
         strain: currentCycle.score?.strain || 0,
         averageHeartRate: currentCycle.score?.average_heart_rate || 0,
         maxHeartRate: currentCycle.score?.max_heart_rate || 0,
@@ -605,39 +577,27 @@ app.get('/current-strain', async (req, res) => {
         end: currentCycle.end,
         scoreState: currentCycle.score_state,
         timestamp: new Date().toISOString() // Add current time for debugging
-      });
+      };
+
+      // Send strain data to Foundry automatically
+      try {
+        await sendToFoundry("strain", {
+          ...strainData,
+          user_id: req.user.userId
+        });
+        console.log('Strain data sent to Foundry automatically');
+      } catch (foundryError) {
+        console.error('Error sending strain to Foundry:', foundryError);
+        // Don't fail the main request if Foundry fails
+      }
+
+      res.json(strainData);
     } else {
       res.json({ error: 'No cycle data available' });
     }
   } catch (error) {
     console.error('Error fetching current strain:', error);
     res.status(500).json({ error: 'Failed to fetch strain data' });
-  }
-});
-
-// Endpoint to send strain data to Foundry
-app.post('/send-strain-to-foundry', async (req, res) => {
-  if (!req.user) {
-    return res.status(401).json({ error: 'Not authenticated' });
-  }
-
-  try {
-    // Send strain data to Foundry
-    await sendToFoundry("strain", {
-      strain: req.body.strain,
-      averageHeartRate: req.body.averageHeartRate,
-      maxHeartRate: req.body.maxHeartRate,
-      start: req.body.start,
-      end: req.body.end,
-      scoreState: req.body.scoreState,
-      timestamp: req.body.timestamp,
-      user_id: req.user.userId
-    });
-
-    res.json({ message: 'Strain data sent to Foundry successfully' });
-  } catch (error) {
-    console.error('Error sending to Foundry:', error);
-    res.status(500).json({ error: 'Failed to send data to Foundry' });
   }
 });
 
