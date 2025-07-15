@@ -1,5 +1,4 @@
-// Project/utils/oauth.js
-require('dotenv').config();
+require('dotenv').config({ path: '../../.env' });
 const tokenStorage = require('./tokenStorage');
 
 // Environment variables
@@ -37,8 +36,7 @@ const fetchProfile = async (accessToken, done) => {
  * Handles user data after successful OAuth authentication
  * @param {string} accessToken - OAuth access token from WHOOP
  * @param {string} refreshToken - OAuth refresh token from WHOOP
- * @param {Object} tokenInfo - Token information object
- * @param {number} tokenInfo.expires_in - Token expiration time in seconds
+ * @param {number} expires_in - Token expiration time in seconds
  * @param {Object} profile - User profile data from WHOOP API
  * @param {string} profile.first_name - User's first name
  * @param {string} profile.last_name - User's last name
@@ -57,7 +55,7 @@ const getUser = async (
     const { first_name, last_name, user_id } = profile;
     const expiresAt = Date.now() + expires_in * 1000;
 
-    // Store tokens persistently for webhook access
+    // Store tokens persistently for api access
     await tokenStorage.set(user_id, {
       accessToken,
       refreshToken,

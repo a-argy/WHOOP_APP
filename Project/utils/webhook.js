@@ -1,3 +1,4 @@
+require('dotenv').config({ path: '../../.env' });
 const crypto = require('crypto');
 const CLIENT_SECRET = process.env.CLIENT_SECRET;
 
@@ -10,7 +11,6 @@ if (!CLIENT_SECRET) {
  * @param {string} timestamp - Webhook timestamp
  * @param {Object} body - request body
  * @param {string} signature - Provided signature
- * @param {string} secret - Secret key for validation
  * @returns {boolean} - True if signature is valid
  */
 function validateWebhookSignature(timestamp, body, signature) {

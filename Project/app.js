@@ -1,4 +1,4 @@
-require('dotenv').config();
+require('dotenv').config({ path: '../.env' });
 const express = require('express');
 const passport = require('passport');
 const OAuth2Strategy = require('passport-oauth2').Strategy;
@@ -7,7 +7,7 @@ const FileStore = require('session-file-store')(session);
 const crypto = require('crypto');
 const { validateWebhookSignature } = require('./utils/webhook');
 const { sendToFoundry } = require('./utils/foundry');
-const { checkAndRefresh, fetchWorkoutData, fetchSleepData, fetchRecoveryData, makeWhoopApiCall } = require('./utils/whoop');
+const { fetchWorkoutData, fetchSleepData, fetchRecoveryData, makeWhoopApiCall } = require('./utils/whoop');
 const { getUser, fetchProfile } = require('./utils/oauth');
 const tokenStorage = require('./utils/tokenStorage');
 
@@ -32,7 +32,8 @@ if (!CLIENT_SECRET) {
   throw new Error('CLIENT_SECRET environment variable is required');
 }
 
-// Configure session middleware with file store
+// Configure session middleware with file store. A cookie is created and stored 
+// in the browser, when the user initially visits the app
 app.use(session({
   store: new FileStore({
     path: './sessions',
@@ -49,10 +50,12 @@ app.use(session({
   }
 }));
 
-// EXPLAIN THIS SECTION
-
 // Initialize Passport
 app.use(passport.initialize());
+// When the session is authenticated, Passport will take the user object from 
+// getUser and passes it to the serializer function which can filter the fields
+// and then store in the session cookie. As long as the session is unexpired,
+// the user will not have to re-authenticate with WHOOP
 app.use(passport.session());
 
 // WHOOP OAuth 2.0 Configuration
@@ -74,27 +77,32 @@ const whoopOAuthConfig = {
   ],
 };
 
-// Configure Passport serialization
+// Called once when the user completes authentication. After getUser returns a 
+// user object, Passport adds it to the session cookie
 passport.serializeUser((user, done) => {
   done(null, user);
 });
 
+// Called on every request before route handlers run. This is yielding the entire
+// user from the session cookie sent back by the browser and req.user is set
 passport.deserializeUser((user, done) => {
   done(null, user);
 });
 
-// Create and configure the WHOOP OAuth 2.0 strategy with getUser as the callback
+// Create and configure the WHOOP OAuth 2.0 strategy with getUser as the 'verify' function (happens after fetchProfile) 
+// which establishes a login session for the user on this app
 const whoopAuthorizationStrategy = new OAuth2Strategy(whoopOAuthConfig, getUser);
+// Passport makes a call to the WHOOP API once the user is authenticated to get profile data
 whoopAuthorizationStrategy.userProfile = fetchProfile;
 
-// Registers the configured strategy with Passport under the name 'whoop'
+// Registers the configured strategy with Passport under the name 'whoop' (this is the name of the strategy)
 passport.use('whoop', whoopAuthorizationStrategy);
 
 // Passport uses whoopAuthorizationStrategy to build a URL that redirects the user to WHOOP login page
 app.get('/auth/whoop', passport.authenticate('whoop'));
 
 // After user authorizes, WHOOP rediracts to callback. Now, Passport makes a request to WHOOP
-// exchanging the provided authorization code for access tokens. Passport makes a call to getUser
+// exchanging the provided authorization code for access tokens, gets the user (fetchProfile) Passport makes a call to getUser
 // with the access token
 app.get('/callback',
   passport.authenticate('whoop', { failureRedirect: '/login' }),
@@ -102,8 +110,6 @@ app.get('/callback',
     res.redirect('/');
   }
 );
-
-// SECTION ENDS HERE
 
 // Webhook endpoint
 app.post('/webhook', async (req, res) => {

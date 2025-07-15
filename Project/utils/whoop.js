@@ -1,4 +1,4 @@
-require('dotenv').config();
+require('dotenv').config({ path: '../../.env' });
 const tokenStorage = require('./tokenStorage');
 
 // Get environment variables
@@ -106,7 +106,7 @@ async function makeWhoopApiCall(endpoint, userId) {
  * @returns {Promise<Object>} - Workout data
  * @throws {Error} - When API call fails
  */
-async function fetchWorkoutDataByUserId(workoutId, userId) {
+async function fetchWorkoutData(workoutId, userId) {
   return makeWhoopApiCall(`/developer/v1/activity/workout/${workoutId}`, userId);
 }
 
@@ -134,7 +134,7 @@ async function fetchRecoveryData(cycleId, userId) {
 
 module.exports = {
     checkAndRefresh,
-    fetchWorkoutDataByUserId,
+    fetchWorkoutData,
     fetchSleepData,
     fetchRecoveryData,
     makeWhoopApiCall
