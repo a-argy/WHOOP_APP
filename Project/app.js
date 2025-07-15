@@ -3,203 +3,53 @@ const express = require('express');
 const passport = require('passport');
 const OAuth2Strategy = require('passport-oauth2').Strategy;
 const session = require('express-session');
+const FileStore = require('session-file-store')(session);
 const crypto = require('crypto');
 const { validateWebhookSignature } = require('./utils/webhook');
 const { sendToFoundry } = require('./utils/foundry');
-const { checkAndRefresh, fetchWorkoutData, fetchSleepData, fetchRecoveryData } = require('./utils/whoop');
+const { checkAndRefresh, fetchWorkoutData, fetchSleepData, fetchRecoveryData, makeWhoopApiCall } = require('./utils/whoop');
+const { getUser, fetchProfile } = require('./utils/oauth');
+const tokenStorage = require('./utils/tokenStorage');
 
 const app = express();
+
 // Add body parser middleware for webhook JSON
 app.use(express.json());
 
-// Store user tokens (in production, use a proper database)
-const userTokens = new Map();
-
-// Set environment variables in .env file
+// Environment variables
 const WHOOP_API_HOSTNAME = process.env.WHOOP_API_HOSTNAME || 'https://api.prod.whoop.com';
-const CALLBACK_URL = process.env.CALLBACK_URL || 'http://localhost:8080/callback';
+const CALLBACK_URL = process.env.CALLBACK_URL || 'http://localhost:3000/callback';
 const CLIENT_ID = process.env.CLIENT_ID;
 const CLIENT_SECRET = process.env.CLIENT_SECRET;
+const SESSION_SECRET = process.env.SESSION_SECRET || crypto.randomBytes(32).toString('hex');
+const PORT = process.env.PORT || 3000;
 
-// Webhook endpoint
-app.post('/webhook', async (req, res) => {
-  const signature = req.headers['x-whoop-signature'];
-  const timestamp = req.headers['x-whoop-signature-timestamp'];
+// Validate required environment variables
+if (!CLIENT_ID) {
+  throw new Error('CLIENT_ID environment variable is required');
+}
+if (!CLIENT_SECRET) {
+  throw new Error('CLIENT_SECRET environment variable is required');
+}
 
-  // Validate webhook signature
-  if (!validateWebhookSignature(timestamp, req.body, signature)) {
-    console.error('Invalid webhook signature');
-    return res.status(401).json({ error: 'Invalid signature' });
-  }
-
-  const { type, user_id, id, score_state } = req.body;
-
-  // Check if token needs refresh
-  const accessToken = await checkAndRefresh(user_id, userTokens);
-
-  // Handle different webhook event types
-  switch (type) {
-    case 'workout.updated':
-      try {
-        // Fetch workout data from WHOOP API
-        const workoutData = await fetchWorkoutData(id, accessToken);
-
-        // Send workout data to Foundry
-        await sendToFoundry("workout", {
-          ...workoutData,
-          user_id: user_id,
-          webhook_received_at: new Date().toISOString()
-        });
-        
-        // Log the workout details
-        console.log('New workout update received and data fetched:');
-        console.log('User ID:', user_id);
-        console.log('Workout ID:', id);
-        console.log('Workout Data:', JSON.stringify(workoutData, null, 2));
-        console.log('-------------------');
-
-        res.status(200).json({ message: 'Workout update processed successfully' });
-      } catch (error) {
-        console.error('Error processing workout update webhook:', error);
-        res.status(500).json({ error: 'Failed to process workout update' });
-      }
-      break;
-
-    case 'workout.deleted':
-      try {
-        // Send deletion event to Foundry
-        await sendToFoundry("workout_deleted", { 
-          workout_id: id,
-          user_id: user_id,
-          deleted_at: new Date().toISOString()
-        });
-
-        // Log the deletion event without trying to fetch the workout data
-        console.log('Workout deletion notification received:');
-        console.log('User ID:', user_id);
-        console.log('Deleted Workout ID:', id);
-        console.log('-------------------');
-    
-        
-        res.status(200).json({ message: 'Workout deletion processed successfully' });
-      } catch (error) {
-        console.error('Error processing workout deletion:', error);
-        res.status(500).json({ error: 'Failed to process workout deletion' });
-      }
-      break;
-
-    case 'sleep.updated':
-      try {
-        // Fetch sleep data from WHOOP API
-        const sleepData = await fetchSleepData(id, accessToken);
-
-        // Send sleep data to Foundry
-        await sendToFoundry("sleep", {
-          ...sleepData,
-          user_id: user_id,
-          webhook_received_at: new Date().toISOString()
-        });
-        
-        // Log the sleep details
-        console.log('New sleep update received and data fetched:');
-        console.log('User ID:', user_id);
-        console.log('Sleep ID:', id);
-        console.log('Sleep Data:', JSON.stringify(sleepData, null, 2));
-        console.log('-------------------');
-
-        res.status(200).json({ message: 'Sleep update processed successfully' });
-      } catch (error) {
-        console.error('Error processing sleep update webhook:', error);
-        res.status(500).json({ error: 'Failed to process sleep update' });
-      }
-      break;
-
-    case 'sleep.deleted':
-      try {
-        // Send deletion event to Foundry
-        await sendToFoundry("sleep_deleted", { 
-          sleep_id: id,
-          user_id: user_id,
-          deleted_at: new Date().toISOString()
-        });
-
-        // Log the deletion event without trying to fetch the sleep data
-        console.log('Sleep deletion notification received:');
-        console.log('User ID:', user_id);
-        console.log('Deleted Sleep ID:', id);
-        console.log('-------------------');
-        
-        res.status(200).json({ message: 'Sleep deletion processed successfully' });
-      } catch (error) {
-        console.error('Error processing sleep deletion:', error);
-        res.status(500).json({ error: 'Failed to process sleep deletion' });
-      }
-      break;
-
-    case 'recovery.updated':
-      try {
-        // Fetch recovery data from WHOOP API
-        const recoveryData = await fetchRecoveryData(id, accessToken);
-
-        // Send recovery data to Foundry
-        await sendToFoundry("recovery", {
-          ...recoveryData,
-          user_id: user_id,
-          webhook_received_at: new Date().toISOString()
-        });
-        
-        // Log the recovery details
-        console.log('New recovery update received and data fetched:');
-        console.log('User ID:', user_id);
-        console.log('Cycle ID:', id);
-        console.log('Recovery Data:', JSON.stringify(recoveryData, null, 2));
-        console.log('-------------------');
-
-        res.status(200).json({ message: 'Recovery update processed successfully' });
-      } catch (error) {
-        console.error('Error processing recovery update webhook:', error);
-        res.status(500).json({ error: 'Failed to process recovery update' });
-      }
-      break;
-
-    case 'recovery.deleted':
-      try {
-        // Send deletion event to Foundry
-        await sendToFoundry("recovery_deleted", { 
-          cycle_id: id,
-          user_id: user_id,
-          deleted_at: new Date().toISOString()
-        });
-
-        // Log the deletion event without trying to fetch the recovery data
-        console.log('Recovery deletion notification received:');
-        console.log('User ID:', user_id);
-        console.log('Deleted Cycle ID:', id);
-        console.log('-------------------');
-        
-        res.status(200).json({ message: 'Recovery deletion processed successfully' });
-      } catch (error) {
-        console.error('Error processing recovery deletion:', error);
-        res.status(500).json({ error: 'Failed to process recovery deletion' });
-      }
-      break;
-
-    default:
-      // Acknowledge other webhook types
-      console.log(`Received webhook of type: ${type}`);
-      console.log('User ID:', user_id);
-      console.log('Object ID:', id);
-      console.log('-------------------');
-      res.status(200).json({ message: 'Webhook received' });
-  }
-});
-
-// Configure session middleware
+// Configure session middleware with file store
 app.use(session({
-  secret: 'your-session-secret',
+  store: new FileStore({
+    path: './sessions',
+    ttl: 60 * 60 * 24,
+    secret: SESSION_SECRET
+  }),
+  secret: SESSION_SECRET,
   resave: false,
-  saveUninitialized: false
+  saveUninitialized: false,
+  cookie: {
+    secure: process.env.NODE_ENV === 'production',
+    httpOnly: true,
+    maxAge: 1000 * 60 * 60 * 24
+  }
 }));
+
+// EXPLAIN THIS SECTION
 
 // Initialize Passport
 app.use(passport.initialize());
@@ -224,74 +74,6 @@ const whoopOAuthConfig = {
   ],
 };
 
-// Function to fetch user profile from WHOOP
-const fetchProfile = async (accessToken, done) => {
-  try {
-    const profileResponse = await fetch(
-      `${WHOOP_API_HOSTNAME}/developer/v1/user/profile/basic`,
-      {
-      headers: {
-          Authorization: `Bearer ${accessToken}`,
-        },
-      }
-    );
-
-    if (!profileResponse.ok) {
-      return done(new Error('Failed to fetch profile'));
-    }
-
-    const profile = await profileResponse.json();
-    done(null, profile);
-  } catch (error) {
-    done(error);
-  }
-};
-
-// Function to handle user after successful authentication
-const getUser = async (
-  accessToken,
-  refreshToken,
-  { expires_in },
-  profile,
-  done
-) => {
-  try {
-    const { first_name, last_name, user_id } = profile;
-
-    // Create user object with WHOOP data
-    const user = {
-      accessToken,
-      expiresAt: Date.now() + expires_in * 1000,
-      firstName: first_name,
-      lastName: last_name,
-      refreshToken,
-      userId: user_id,
-    };
-
-    // Store tokens for webhook access
-    userTokens.set(user_id, {
-      accessToken,
-      refreshToken,
-      expiresAt: user.expiresAt
-    });
-
-    // In a real application, you would save this to your database
-    // For this example, we'll just log it and return the user object
-    console.log('User authenticated successfully:', {
-      userId: user_id,
-      firstName: first_name,
-      lastName: last_name,
-      accessToken: accessToken ? '***' : null,
-      refreshToken: refreshToken ? '***' : null,
-      expiresAt: new Date(user.expiresAt).toISOString()
-    });
-
-    done(null, user);
-  } catch (error) {
-    done(error);
-  }
-};
-
 // Configure Passport serialization
 passport.serializeUser((user, done) => {
   done(null, user);
@@ -301,13 +83,179 @@ passport.deserializeUser((user, done) => {
   done(null, user);
 });
 
-// Create and configure the WHOOP OAuth 2.0 strategy
+// Create and configure the WHOOP OAuth 2.0 strategy with getUser as the callback
 const whoopAuthorizationStrategy = new OAuth2Strategy(whoopOAuthConfig, getUser);
 whoopAuthorizationStrategy.userProfile = fetchProfile;
 
-// Use the strategy with Passport
+// Registers the configured strategy with Passport under the name 'whoop'
 passport.use('whoop', whoopAuthorizationStrategy);
-    
+
+// Passport uses whoopAuthorizationStrategy to build a URL that redirects the user to WHOOP login page
+app.get('/auth/whoop', passport.authenticate('whoop'));
+
+// After user authorizes, WHOOP rediracts to callback. Now, Passport makes a request to WHOOP
+// exchanging the provided authorization code for access tokens. Passport makes a call to getUser
+// with the access token
+app.get('/callback',
+  passport.authenticate('whoop', { failureRedirect: '/login' }),
+  function (req, res) {
+    res.redirect('/');
+  }
+);
+
+// SECTION ENDS HERE
+
+// Webhook endpoint
+app.post('/webhook', async (req, res) => {
+  // Validate webhook signature
+  const signature = req.headers['x-whoop-signature'];
+  const timestamp = req.headers['x-whoop-signature-timestamp'];
+  if (!validateWebhookSignature(timestamp, req.body, signature)) {
+    console.error('Invalid webhook signature');
+    return res.status(401).json({ error: 'Invalid signature' });
+  }
+
+  const { type, user_id, id } = req.body;
+
+  try {
+    // Handle different webhook event types
+    switch (type) {
+      case 'workout.updated':
+        try {
+          const workoutData = await fetchWorkoutData(id, user_id);
+          await sendToFoundry("workout", {
+            ...workoutData,
+            user_id: user_id,
+            webhook_received_at: new Date().toISOString()
+          });
+          
+          console.log('New workout update received and data fetched:');
+          console.log('User ID:', user_id);
+          console.log('Workout ID:', id);
+          console.log('-------------------');
+
+          res.status(200).json({ message: 'Workout update processed successfully' });
+        } catch (error) {
+          console.error('Error processing workout update webhook:', error);
+          res.status(500).json({ error: 'Failed to process workout update' });
+        }
+        break;
+
+      case 'workout.deleted':
+        try {
+          await sendToFoundry("workout_deleted", { 
+            workout_id: id,
+            user_id: user_id,
+            deleted_at: new Date().toISOString()
+          });
+
+          console.log('Workout deletion notification received:');
+          console.log('User ID:', user_id);
+          console.log('Deleted Workout ID:', id);
+          console.log('-------------------');
+          
+          res.status(200).json({ message: 'Workout deletion processed successfully' });
+        } catch (error) {
+          console.error('Error processing workout deletion:', error);
+          res.status(500).json({ error: 'Failed to process workout deletion' });
+        }
+        break;
+
+      case 'sleep.updated':
+        try {
+          const sleepData = await fetchSleepData(id, user_id);
+          await sendToFoundry("sleep", {
+            ...sleepData,
+            user_id: user_id,
+            webhook_received_at: new Date().toISOString()
+          });
+          
+          console.log('New sleep update received and data fetched:');
+          console.log('User ID:', user_id);
+          console.log('Sleep ID:', id);
+          console.log('-------------------');
+
+          res.status(200).json({ message: 'Sleep update processed successfully' });
+        } catch (error) {
+          console.error('Error processing sleep update webhook:', error);
+          res.status(500).json({ error: 'Failed to process sleep update' });
+        }
+        break;
+
+      case 'sleep.deleted':
+        try {
+          await sendToFoundry("sleep_deleted", { 
+            sleep_id: id,
+            user_id: user_id,
+            deleted_at: new Date().toISOString()
+          });
+
+          console.log('Sleep deletion notification received:');
+          console.log('User ID:', user_id);
+          console.log('Deleted Sleep ID:', id);
+          console.log('-------------------');
+          
+          res.status(200).json({ message: 'Sleep deletion processed successfully' });
+        } catch (error) {
+          console.error('Error processing sleep deletion:', error);
+          res.status(500).json({ error: 'Failed to process sleep deletion' });
+        }
+        break;
+
+      case 'recovery.updated':
+        try {
+          const recoveryData = await fetchRecoveryData(id, user_id);
+          await sendToFoundry("recovery", {
+            ...recoveryData,
+            user_id: user_id,
+            webhook_received_at: new Date().toISOString()
+          });
+          
+          console.log('New recovery update received and data fetched:');
+          console.log('User ID:', user_id);
+          console.log('Cycle ID:', id);
+          console.log('-------------------');
+
+          res.status(200).json({ message: 'Recovery update processed successfully' });
+        } catch (error) {
+          console.error('Error processing recovery update webhook:', error);
+          res.status(500).json({ error: 'Failed to process recovery update' });
+        }
+        break;
+
+      case 'recovery.deleted':
+        try {
+          await sendToFoundry("recovery_deleted", { 
+            cycle_id: id,
+            user_id: user_id,
+            deleted_at: new Date().toISOString()
+          });
+
+          console.log('Recovery deletion notification received:');
+          console.log('User ID:', user_id);
+          console.log('Deleted Cycle ID:', id);
+          console.log('-------------------');
+          
+          res.status(200).json({ message: 'Recovery deletion processed successfully' });
+        } catch (error) {
+          console.error('Error processing recovery deletion:', error);
+          res.status(500).json({ error: 'Failed to process recovery deletion' });
+        }
+        break;
+
+      default:
+        console.log(`Received webhook of type: ${type}`);
+        console.log('User ID:', user_id);
+        console.log('Object ID:', id);
+        console.log('-------------------');
+        res.status(200).json({ message: 'Webhook received' });
+    }
+  } catch (error) {
+    console.error('Error processing webhook:', error);
+    res.status(500).json({ error: 'Failed to process webhook' });
+  }
+});
+
 // Routes
 app.get('/', (req, res) => {
   res.send(`
@@ -443,24 +391,16 @@ app.get('/', (req, res) => {
           }
         }
 
-        async function sendStrainToFoundry() {
-          // This function is no longer needed since /current-strain automatically sends to Foundry
-          // Just call updateStrainDisplay which will trigger the Foundry send
-          await updateStrainDisplay();
-        }
-
         function toggleStrainPolling() {
           const button = document.getElementById('pollStrainButton');
           if (pollingInterval) {
-            // Stop polling
             clearInterval(pollingInterval);
             pollingInterval = null;
             button.textContent = 'Start Strain Polling';
             button.classList.remove('active');
           } else {
-            // Start polling
-            updateStrainDisplay(); // Initial update (automatically sends to Foundry)
-            pollingInterval = setInterval(updateStrainDisplay, 60000); // Update display every minute (automatically sends to Foundry)
+            updateStrainDisplay();
+            pollingInterval = setInterval(updateStrainDisplay, 60000);
             button.textContent = 'Stop Strain Polling';
             button.classList.add('active');
           }
@@ -470,7 +410,7 @@ app.get('/', (req, res) => {
     <body>
       <div class="container">
         <h1>WHOOP Dashboard</h1>
-        ${req.user 
+        ${req.user && req.user.isAuthenticated
           ? `
             <p>Welcome, ${req.user.firstName}!</p>
             <button class="button" onclick="fetchWhoopData('/whoop-data')">Fetch Profile Data</button>
@@ -492,20 +432,9 @@ app.get('/', (req, res) => {
   `);
 });
 
-// Authentication routes
-app.get('/auth/whoop', passport.authenticate('whoop'));
-
-app.get('/callback',
-  passport.authenticate('whoop', { failureRedirect: '/login' }),
-  function (req, res) {
-    // Successful authentication, redirect to home
-    res.redirect('/');
-  }
-);
-
 // Protected route example
 app.get('/profile', (req, res) => {
-  if (!req.user) {
+  if (!req.user || !req.user.isAuthenticated) {
     return res.status(401).json({ error: 'Not authenticated' });
   }
   
@@ -515,20 +444,29 @@ app.get('/profile', (req, res) => {
   });
 });
 
-// Body stats route
-app.get('/body-stats', async (req, res) => {
-  if (!req.user) {
+// WHOOP data route
+app.get('/whoop-data', async (req, res) => {
+  if (!req.user || !req.user.isAuthenticated) {
     return res.status(401).json({ error: 'Not authenticated' });
   }
 
   try {
-    const response = await makeWhoopApiCall('/developer/v1/user/measurement/body', req.user);
-    
-    if (!response.ok) {
-      throw new Error(`WHOOP API error: ${response.status}`);
-    }
+    const data = await makeWhoopApiCall('/developer/v1/user/profile/basic', req.user.userId);
+    res.json(data);
+  } catch (error) {
+    console.error('Error fetching WHOOP data:', error);
+    res.status(500).json({ error: 'Failed to fetch WHOOP data' });
+  }
+});
 
-    const data = await response.json();
+// Body stats route
+app.get('/body-stats', async (req, res) => {
+  if (!req.user || !req.user.isAuthenticated) {
+    return res.status(401).json({ error: 'Not authenticated' });
+  }
+
+  try {
+    const data = await makeWhoopApiCall('/developer/v1/user/measurement/body', req.user.userId);
     res.json(data);
   } catch (error) {
     console.error('Error fetching body stats:', error);
@@ -538,35 +476,20 @@ app.get('/body-stats', async (req, res) => {
 
 // Current strain route
 app.get('/current-strain', async (req, res) => {
-  if (!req.user || !req.user.accessToken) {
-    return res.status(401).json({ error: 'Not authenticated or no access token' });
+  if (!req.user || !req.user.isAuthenticated) {
+    return res.status(401).json({ error: 'Not authenticated' });
   }
 
   try {
-    // Get the current time
     const now = new Date();
-    // Get cycles from the last hour to ensure we get the most recent one
     const start = new Date(now - 60 * 60 * 1000).toISOString();
     const end = now.toISOString();
     
-    const response = await fetch(
-      `${WHOOP_API_HOSTNAME}/developer/v1/cycle?start=${start}&end=${end}&limit=1`,
-      {
-        headers: {
-          Authorization: `Bearer ${req.user.accessToken}`,
-          'Content-Type': 'application/json'
-        }
-      }
+    const data = await makeWhoopApiCall(
+      `/developer/v1/cycle?start=${start}&end=${end}&limit=1`,
+      req.user.userId
     );
 
-    if (!response.ok) {
-      throw new Error(`WHOOP API error: ${response.status}`);
-    }
-
-    const data = await response.json();
-    console.log('Current strain data:', data); // Add logging to help debug
-
-    // Return the most recent cycle's strain data
     if (data.records && data.records.length > 0) {
       const currentCycle = data.records[0];
       const strainData = {
@@ -576,7 +499,7 @@ app.get('/current-strain', async (req, res) => {
         start: currentCycle.start,
         end: currentCycle.end,
         scoreState: currentCycle.score_state,
-        timestamp: new Date().toISOString() // Add current time for debugging
+        timestamp: new Date().toISOString()
       };
 
       // Send strain data to Foundry automatically
@@ -588,7 +511,6 @@ app.get('/current-strain', async (req, res) => {
         console.log('Strain data sent to Foundry automatically');
       } catch (foundryError) {
         console.error('Error sending strain to Foundry:', foundryError);
-        // Don't fail the main request if Foundry fails
       }
 
       res.json(strainData);
@@ -602,7 +524,17 @@ app.get('/current-strain', async (req, res) => {
 });
 
 // Logout route
-app.get('/logout', (req, res) => {
+app.get('/logout', async (req, res) => {
+  if (req.user && req.user.userId) {
+    // Optionally clean up user tokens on logout
+    try {
+      await tokenStorage.delete(req.user.userId);
+      console.log(`Cleaned up tokens for user: ${req.user.userId}`);
+    } catch (error) {
+      console.error('Error cleaning up tokens:', error);
+    }
+  }
+  
   req.logout((err) => {
     if (err) {
       return res.status(500).json({ error: 'Logout failed' });
@@ -611,12 +543,38 @@ app.get('/logout', (req, res) => {
   });
 });
 
+// Health check endpoint
+app.get('/health', (req, res) => {
+  res.json({ 
+    status: 'healthy', 
+    timestamp: new Date().toISOString(),
+    uptime: process.uptime()
+  });
+});
+
+// Error handling middleware
+app.use((err, req, res, next) => {
+  console.error('Error:', err);
+  res.status(500).json({ error: 'Something went wrong!' });
+});
+
+// Graceful shutdown
+process.on('SIGINT', async () => {
+  console.log('Received SIGINT, shutting down gracefully...');
+  
+  // Clean up expired tokens
+  try {
+    await tokenStorage.cleanup();
+    console.log('Token cleanup completed');
+  } catch (error) {
+    console.error('Error during cleanup:', error);
+  }
+  
+  process.exit(0);
+});
+
 // Start server
-app.listen(3000, () => {
-  console.log('Server running on http://localhost:3000');
-  console.log('Visit http://localhost:3000 to start the OAuth flow');
-  console.log('Make sure to set your environment variables:');
-  console.log('- CLIENT_ID');
-  console.log('- CLIENT_SECRET');
-  console.log('- CALLBACK_URL (optional, defaults to http://localhost:3000/callback)');
+app.listen(PORT, () => {
+  console.log(`Server running on http://localhost:${PORT}`);
+  console.log('Visit the URL to start the OAuth flow');
 });

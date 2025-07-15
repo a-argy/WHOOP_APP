@@ -1,4 +1,5 @@
 require('dotenv').config();
+const tokenStorage = require('./tokenStorage');
 
 // Get environment variables
 const WHOOP_API_HOSTNAME = process.env.WHOOP_API_HOSTNAME || 'https://api.prod.whoop.com';
@@ -16,19 +17,20 @@ if (!CLIENT_SECRET) {
 /**
  * Checks if token needs refresh and refreshes if necessary
  * @param {string} user_id - User ID
- * @param {Map} userTokens - Map containing user_id as key and token object containing refresh token and expiration info as value
  * @returns {Promise<string>} - Valid access token (either existing or refreshed)
  * @throws {Error} - When token refresh fails or API returns an error
  */
-async function checkAndRefresh(user_id, userTokens) {
+async function checkAndRefresh(user_id) {
   try {
-    const userToken = userTokens.get(user_id);
+    const userToken = await tokenStorage.get(user_id);
     if (!userToken) {
       throw new Error(`No access token found for user: ${user_id}`);
     }
 
     // Check if token needs refresh
     if (Date.now() >= userToken.expiresAt) {
+      console.log(`Token expired for user ${user_id}, refreshing...`);
+      
       const response = await fetch(`${WHOOP_API_HOSTNAME}/oauth/oauth2/token`, {
         method: 'POST',
         headers: {
@@ -49,13 +51,14 @@ async function checkAndRefresh(user_id, userTokens) {
 
       const data = await response.json();
       
-      // Update the Map with new tokens
-      userTokens.set(user_id, {
+      // Update persistent storage with new tokens
+      await tokenStorage.set(user_id, {
         accessToken: data.access_token,
         refreshToken: data.refresh_token,
         expiresAt: Date.now() + data.expires_in * 1000
       });
 
+      console.log(`Token refreshed successfully for user ${user_id}`);
       return data.access_token;
     }
 
@@ -69,14 +72,15 @@ async function checkAndRefresh(user_id, userTokens) {
 }
 
 /**
- * Generic function to fetch data from WHOOP API
+ * Makes authenticated WHOOP API calls with automatic token refresh
  * @param {string} endpoint - API endpoint path
- * @param {string} accessToken - Valid access token
- * @returns {Promise<Object>} - API response data
- * @throws {Error} - When API call fails
+ * @param {string} userId - User ID for token lookup
+ * @returns {Promise<Object|Response>} - API response (parsed or raw)
  */
-async function fetchWhoopData(endpoint, accessToken) {
+async function makeWhoopApiCall(endpoint, userId) {
   try {
+    const accessToken = await checkAndRefresh(userId);
+    
     const response = await fetch(`${WHOOP_API_HOSTNAME}${endpoint}`, {
       headers: {
         Authorization: `Bearer ${accessToken}`,
@@ -90,7 +94,7 @@ async function fetchWhoopData(endpoint, accessToken) {
 
     return await response.json();
   } catch (error) {
-    console.error(`Error fetching WHOOP data from ${endpoint}:`, error);
+    console.error(`Error making WHOOP API call to ${endpoint}:`, error);
     throw error;
   }
 }
@@ -98,39 +102,40 @@ async function fetchWhoopData(endpoint, accessToken) {
 /**
  * Fetches workout data from WHOOP API
  * @param {string} workoutId - Workout ID
- * @param {string} accessToken - Valid access token
+* @param {string} userId - User ID for token lookup
  * @returns {Promise<Object>} - Workout data
  * @throws {Error} - When API call fails
  */
-async function fetchWorkoutData(workoutId, accessToken) {
-  return fetchWhoopData(`/developer/v1/activity/workout/${workoutId}`, accessToken);
+async function fetchWorkoutDataByUserId(workoutId, userId) {
+  return makeWhoopApiCall(`/developer/v1/activity/workout/${workoutId}`, userId);
 }
 
 /**
  * Fetches sleep data from WHOOP API
  * @param {string} sleepId - Sleep ID
- * @param {string} accessToken - Valid access token
+ * @param {string} userId - User ID for token lookup
  * @returns {Promise<Object>} - Sleep data
  * @throws {Error} - When API call fails
  */
-async function fetchSleepData(sleepId, accessToken) {
-  return fetchWhoopData(`/developer/v1/activity/sleep/${sleepId}`, accessToken);
+async function fetchSleepData(sleepId, userId) {
+  return makeWhoopApiCall(`/developer/v1/activity/sleep/${sleepId}`, userId);
 }
 
 /**
  * Fetches recovery data from WHOOP API
  * @param {string} cycleId - Cycle ID
- * @param {string} accessToken - Valid access token
+ * @param {string} userId - User ID for token lookup
  * @returns {Promise<Object>} - Recovery data
  * @throws {Error} - When API call fails
  */
-async function fetchRecoveryData(cycleId, accessToken) {
-  return fetchWhoopData(`/developer/v1/cycle/${cycleId}/recovery`, accessToken);
+async function fetchRecoveryData(cycleId, userId) {
+  return makeWhoopApiCall(`/developer/v1/cycle/${cycleId}/recovery`, userId);
 }
 
 module.exports = {
     checkAndRefresh,
-    fetchWorkoutData,
+    fetchWorkoutDataByUserId,
     fetchSleepData,
-    fetchRecoveryData
+    fetchRecoveryData,
+    makeWhoopApiCall
 };
