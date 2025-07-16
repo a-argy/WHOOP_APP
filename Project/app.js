@@ -11,6 +11,7 @@ const { fetchWorkoutData, fetchSleepData, fetchRecoveryData, makeWhoopApiCall } 
 const { getUser, fetchProfile } = require('./utils/oauth');
 const tokenStorage = require('./utils/tokenStorage');
 const strainManager = require('./worker/strainPoller');
+const { strainEmitter } = strainManager;
 
 const app = express();
 
@@ -477,26 +478,30 @@ app.get('/', (req, res) => {
           try {
             const response = await fetch('/current-strain');
             const data = await response.json();
-            
+             
             if (data.error) {
               throw new Error(data.error);
             }
             
-            const strainDisplay = document.getElementById('strain-display');
-            strainDisplay.innerHTML = \`
-              <div class="strain-value">Current Strain: \${data.strain.toFixed(2)}</div>
-              <div class="heart-rate">Average Heart Rate: \${data.averageHeartRate} bpm</div>
-              <div class="heart-rate">Max Heart Rate: \${data.maxHeartRate} bpm</div>
-              <div>Last Updated: \${new Date().toLocaleTimeString()}</div>
-            \`;
+            renderStrain(data);
 
             return data;
           } catch (error) {
             console.error('Error fetching strain:', error);
             const strainDisplay = document.getElementById('strain-display');
-            strainDisplay.innerHTML = \`<div>Error fetching strain data: \${error.message}</div>\`;
+            strainDisplay.innerHTML = '<div>Error fetching strain data: ' + error.message + '</div>';
             throw error;
           }
+        }
+
+        // Reuse a single renderer for both pull & push updates
+        function renderStrain(data) {
+          const strainDisplay = document.getElementById('strain-display');
+          strainDisplay.innerHTML =
+            '<div class="strain-value">Current Strain: ' + data.strain.toFixed(2) + '</div>' +
+            '<div class="heart-rate">Average Heart Rate: ' + data.averageHeartRate + ' bpm</div>' +
+            '<div class="heart-rate">Max Heart Rate: ' + data.maxHeartRate + ' bpm</div>' +
+            '<div>Last Updated: ' + new Date().toLocaleTimeString() + '</div>';
         }
 
         async function toggleStrainPolling() {
@@ -531,26 +536,38 @@ app.get('/', (req, res) => {
             console.error('Error fetching initial polling state', err);
           }
         });
+
+        // Open SSE channel for live updates
+        var strainEvents = new EventSource('/events/strain');
+        strainEvents.onmessage = function (evt) {
+           try {
+             var data = JSON.parse(evt.data);
+             renderStrain(data);
+           } catch (e) {
+             console.error('Failed to parse strain event', e);
+           }
+        };
       </script>
     </head>
     <body>
       <div class="container">
         <h1>WHOOP Dashboard</h1>
-        ${req.user && req.user.isAuthenticated
-          ? `
-            <p>Welcome, ${req.user.firstName}!</p>
-            <button class="button" onclick="fetchWhoopData('/whoop-data')">Fetch Profile Data</button>
-            <button class="button" onclick="fetchWhoopData('/body-stats')">Fetch Body Stats</button>
-            <button id="pollStrainButton" class="button" onclick="toggleStrainPolling()">Start Strain Polling</button>
-            <a href="/disconnect" class="button logout" onclick="return confirm('This will stop background strain monitoring. Are you sure?')">Disconnect WHOOP</a>
-            <div class="loading">Loading data...</div>
-            <div id="strain-display"></div>
-            <pre id="data-display"></pre>
-            `
-          : `
-            <p>Please authenticate with WHOOP to access your data:</p>
-            <a href="/auth/whoop" class="button">Authenticate with WHOOP</a>
-            `
+        ${
+          req.user && req.user.isAuthenticated
+            ? `
+              <p>Welcome, ${req.user.firstName}!</p>
+              <button class="button" onclick="fetchWhoopData('/whoop-data')">Fetch Profile Data</button>
+              <button class="button" onclick="fetchWhoopData('/body-stats')">Fetch Body Stats</button>
+              <button id="pollStrainButton" class="button" onclick="toggleStrainPolling()">Start Strain Polling</button>
+              <a href="/disconnect" class="button logout" onclick="return confirm('This will stop background strain monitoring. Are you sure?')">Disconnect WHOOP</a>
+              <div class="loading">Loading data...</div>
+              <div id="strain-display"></div>
+              <pre id="data-display"></pre>
+              `
+            : `
+              <p>Please authenticate with WHOOP to access your data:</p>
+              <a href="/auth/whoop" class="button">Authenticate with WHOOP</a>
+              `
         }
       </div>
     </body>
@@ -612,17 +629,6 @@ app.get('/current-strain', async (req, res) => {
         timestamp: new Date().toISOString()
       };
 
-      // Send strain data to Foundry automatically
-      try {
-        await sendToFoundry("strain", {
-          ...strainData,
-          user_id: req.user.userId
-        });
-        console.log('Strain data sent to Foundry automatically');
-      } catch (foundryError) {
-        console.error('Error sending strain to Foundry:', foundryError);
-      }
-
       res.json(strainData);
     } else {
       res.json({ error: 'No cycle data available' });
@@ -633,10 +639,30 @@ app.get('/current-strain', async (req, res) => {
   }
 });
 
-// Add new settings endpoints
-// ------------------------------------------------------------------
+// SSE endpoint for live strain updates
+app.get('/events/strain', (req, res) => {
+  if (!req.user || !req.user.isAuthenticated) {
+    return res.sendStatus(401);
+  }
+
+  res.set({
+    'Cache-Control': 'no-cache',
+    'Content-Type': 'text/event-stream',
+    Connection: 'keep-alive'
+  });
+  res.flushHeaders();
+
+  const send = ({ userId, data }) => {
+    if (userId === req.user.userId) {
+      res.write('data:' + JSON.stringify(data) + '\n\n');
+    }
+  };
+
+  strainEmitter.on('strain', send);
+  req.on('close', () => strainEmitter.off('strain', send));
+});
+
 // Strain polling settings endpoints
-// ------------------------------------------------------------------
 app.post('/settings/strain-polling', async (req, res) => {
   if (!req.user || !req.user.isAuthenticated) {
     return res.status(401).json({ error: 'Not authenticated' });
@@ -739,7 +765,6 @@ process.on('SIGINT', async () => {
   // Clean up expired tokens
   try {
     await tokenStorage.cleanup();
-    console.log('Token cleanup completed');
   } catch (error) {
     console.error('Error during cleanup:', error);
   }

@@ -69,7 +69,6 @@ class TokenStorage {
       tokens[userId] = encryptedData;
 
       await fs.writeJson(this.tokensFile, tokens, { spaces: 2 });
-      console.log(`Encrypted tokens saved for user: ${userId}`);
     } catch (error) {
       console.error('Error saving tokens:', error);
       throw error;

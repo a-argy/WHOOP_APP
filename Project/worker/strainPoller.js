@@ -2,11 +2,14 @@ require('dotenv').config({ path: '../../.env' });
 const tokenStorage = require('../utils/tokenStorage');
 const { makeWhoopApiCall } = require('../utils/whoop');
 const { sendToFoundry } = require('../utils/foundry');
+const { EventEmitter } = require('events');
 
 const POLL_INTERVAL = 1000 * 60 * 15;  // 15 minutes
 
 // In-memory map of userId -> interval handle
 const activeTimers = new Map();
+// Local event emitter to broadcast strain updates
+const strainEmitter = new EventEmitter();
 
 /**
  * Polls strain data for a single user
@@ -34,7 +37,10 @@ async function pollUserStrain(userId) {
       };
       // Send strain data to Foundry
       await sendToFoundry("strain", strainData);
-      console.log(`Strain data sent for user ${userId}: ${strainData.strain}`);
+      console.log(`Strain for user ${userId}: ${strainData.strain}`);
+
+      // Broadcast to SSE listeners
+      strainEmitter.emit('strain', { userId, data: strainData });
       return strainData;
     } else {
       console.log(`No cycle data available for user ${userId}`);
@@ -96,4 +102,5 @@ module.exports = {
   stopUserPolling,
   bootstrap,
   shutdown,
+  strainEmitter,
 };

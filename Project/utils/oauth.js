@@ -78,6 +78,7 @@ const getUser = async (
       tokenExpiresAt: new Date(expiresAt).toISOString()
     });
 
+    // Passport looks for the user passed into 'done' to forward to serializeUser
     done(null, user);
   } catch (error) {
     console.error('Error in OAuth getUser:', error);
