@@ -8,15 +8,6 @@ class TokenStorage {
     this.tokensFile = path.join(__dirname, '../data/tokens.json');
     this.secret = process.env.SESSION_SECRET || crypto.randomBytes(32).toString('hex');
     this.algorithm = 'aes-256-gcm';
-    this.ensureDataDir();
-  }
-
-  async ensureDataDir() {
-    try {
-      await fs.ensureDir(path.dirname(this.tokensFile));
-    } catch (error) {
-      console.error('Error creating data directory:', error);
-    }
   }
 
   encrypt(text) {
@@ -63,10 +54,14 @@ class TokenStorage {
   
   async set(userId, tokenData) {
     try {
+      // First get and merge with existing data if it exists
+      const existing = await this.get(userId) || {};
+      const mergedData = { ...existing, ...tokenData };
+      
       const dataToEncrypt = {
-        ...tokenData,
+        ...mergedData,
         updatedAt: new Date().toISOString(),
-        expiresAt: tokenData.expiresAt || (Date.now() + (1000 * 60 * 60 * 24)) 
+        expiresAt: mergedData.expiresAt || (Date.now() + (1000 * 60 * 60 * 24)) 
       };
       
       const tokens = await this.getAll();

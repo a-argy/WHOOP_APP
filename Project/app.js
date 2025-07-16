@@ -10,6 +10,7 @@ const { sendToFoundry } = require('./utils/foundry');
 const { fetchWorkoutData, fetchSleepData, fetchRecoveryData, makeWhoopApiCall } = require('./utils/whoop');
 const { getUser, fetchProfile } = require('./utils/oauth');
 const tokenStorage = require('./utils/tokenStorage');
+const strainManager = require('./worker/strainPoller');
 
 const app = express();
 
@@ -32,8 +33,41 @@ if (!CLIENT_SECRET) {
   throw new Error('CLIENT_SECRET environment variable is required');
 }
 
-// Configure session middleware with file store. A cookie is created and stored 
-// in the browser, when the user initially visits the app
+// -----------------------------------------------------------------------------
+// SESSION MIDDLEWARE  (express-session + session-file-store)
+//
+// 1.  First visit (no `connect.sid` cookie):
+//     • express-session generates a random session-ID (sid).
+//     • An *empty* session object `{}` is persisted to disk by
+//       session-file-store at `./sessions/<sid>.json`.
+//     • A *signed* cookie containing **only** that sid is sent back to the
+//       browser: `Set-Cookie: connect.sid=s%3A<sid>.<signature>; …`.
+//
+// 2.  Subsequent requests:
+//     • Browser sends the cookie.
+//     • express-session verifies the signature using `secret` and loads the
+//       JSON file into `req.session`.  The raw sid is available as
+//       `req.sessionID` (not inside the session object).
+//
+// 3.  After a successful Passport login:
+//     • `serializeUser()` chooses a *tiny* identifier (often `user.id`) to
+//       persist and writes it to `req.session.passport.user`.
+//     • *Before the current response is sent* `express-session`'s `finish`
+//       listener detects that the session object is "dirty" and persists it to
+//       `./sessions/<sid>.json`.  The cookie does **not** change because the
+//       sid stays the same. Subsequent requests will read that file to
+//       rebuild `req.session`.
+//
+// 4.  Important knobs in the config below:
+//     • `secret` – used to sign the cookie; keep it long & random in
+//       production.  It is *not* an encryption key.
+//     • `ttl`    – time-to-live for files; here 24 h.
+//     • `resave` & `saveUninitialized` – disable noisy writes.
+//     • `cookie.secure` – ensures the cookie is only sent over HTTPS in prod.
+//
+// 5.  Scaling tip: swap FileStore for Redis (connect-redis) when you run
+//     multiple server instances.
+// -----------------------------------------------------------------------------
 app.use(session({
   store: new FileStore({
     path: './sessions',
@@ -50,12 +84,38 @@ app.use(session({
   }
 }));
 
-// Initialize Passport
+// ---------------------------------------------------------------------------
+// PASSPORT INITIALISATION & SESSION SUPPORT
+//
+// 1. `passport.initialize()` attaches Passport to the Express request cycle.
+//    It is *stateless* – it neither reads nor writes sessions.
+//
+// 2. `passport.session()` must come *after* `express-session` middleware.
+//    It performs two complementary tasks:
+//       a.  **Deserialise** – On *every* request that carries a valid session
+//           cookie, Passport inspects `req.session.passport?.user`. If that
+//           key exists it invokes `deserializeUser(serialized, cb)` to hydrate
+//           the full user record.  The object yielded by the callback becomes
+//           `req.user`, which is what the rest of the app should rely on.
+//       b.  **Serialise** – During the *initial* login (or an explicit
+//           `req.login(user)` call) Passport invokes `serializeUser(user, cb)`.
+//           Whatever the callback returns is persisted at
+//           `req.session.passport.user` and lives there until disconnect or session
+//           expiry.  A tiny value (e.g. `user.id`) keeps the session file / DB
+//           lean.
+//
+//    ➡  Always read identity from `req.user` – it exists whether the request
+//       was authenticated via a session, a JWT, or a Bearer token.  Peeking at
+//       `req.session.passport.user` ties your code to the storage mechanism
+//       and will break if you later switch strategies.
+//
+// 3. `req.logout([options], cb)` – supplied by Passport – removes both
+//    `req.user` *and* `req.session.passport`.  By default it regenerates the
+//    session (new sid) to protect against session-fixation attacks.  Pass
+//    `{ keepSessionInfo: true }` to preserve other, non-auth keys in the
+//    session.
+// ---------------------------------------------------------------------------
 app.use(passport.initialize());
-// When the session is authenticated, Passport will take the user object from 
-// getUser and passes it to the serializer function which can filter the fields
-// and then store in the session cookie. As long as the session is unexpired,
-// the user will not have to re-authenticate with WHOOP
 app.use(passport.session());
 
 // WHOOP OAuth 2.0 Configuration
@@ -77,20 +137,41 @@ const whoopOAuthConfig = {
   ],
 };
 
-// Called once when the user completes authentication. After getUser returns a 
-// user object, Passport adds it to the session cookie
+// ------------------------------------------------------------
+// SERIALISATION STRATEGY
+//
+// Runs **once per login**.
+//   • Receives the full `user` object returned by the OAuth verify callback.
+//   • Must decide what *minimal* value to persist in the session – keep it
+//     small to reduce I/O (commonly `user.id`).
+//   • That value is stored at `req.session.passport.user` (again: *not* in the
+//     cookie) and reused on every subsequent request.
+//
+// NOTE: In this demo we store the whole user object for convenience.  In a
+// real-world app swap `user` for a lightweight identifier and fetch fresh data
+// inside `deserializeUser` to keep sessions lean and up-to-date.
+// ------------------------------------------------------------
 passport.serializeUser((user, done) => {
-  done(null, user);
+  done(null, user); // ↩️  replace with `user.id` in production
 });
 
-// Called on every request before route handlers run. This is yielding the entire
-// user from the session cookie sent back by the browser and req.user is set
+// ------------------------------------------------------------
+// DESERIALISATION STRATEGY
+//
+// Runs on **every request** that contains a session.
+//   • Accepts whatever was returned by `serializeUser`.
+//   • Typically performs a DB/API lookup to rebuild the full `user` record.
+//   • The result becomes `req.user` for the duration of the request.
+//
+// If you changed what you store in `serializeUser`, update this function to
+// match – the two are a tightly-coupled pair.
+// ------------------------------------------------------------
 passport.deserializeUser((user, done) => {
-  done(null, user);
+  done(null, user); // ↩️  would usually be `User.findById(user, done)`
 });
 
 // Create and configure the WHOOP OAuth 2.0 strategy with getUser as the 'verify' function (happens after fetchProfile) 
-// which establishes a login session for the user on this app
+// which establishes a login session for the user on this app and passes it off to serializeUser
 const whoopAuthorizationStrategy = new OAuth2Strategy(whoopOAuthConfig, getUser);
 // Passport makes a call to the WHOOP API once the user is authenticated to get profile data
 whoopAuthorizationStrategy.userProfile = fetchProfile;
@@ -102,8 +183,8 @@ passport.use('whoop', whoopAuthorizationStrategy);
 app.get('/auth/whoop', passport.authenticate('whoop'));
 
 // After user authorizes, WHOOP rediracts to callback. Now, Passport makes a request to WHOOP
-// exchanging the provided authorization code for access tokens, gets the user (fetchProfile) Passport makes a call to getUser
-// with the access token
+// exchanging the provided authorization code for access tokens, gets the user (fetchProfile),
+// then calls the 'verify' function
 app.get('/callback',
   passport.authenticate('whoop', { failureRedirect: '/login' }),
   function (req, res) {
@@ -349,7 +430,28 @@ app.get('/', (req, res) => {
       </style>
       <script>
         let pollingInterval;
-        
+        const POLL_INTERVAL = 1000 * 60 * 15;  // 15 minutes – matches backend
+
+        // Toggle the strain-polling button appearance/label
+        function updateButtonUI(enabled) {
+          const button = document.getElementById('pollStrainButton');
+          button.classList.toggle('active', enabled);
+          button.textContent = enabled ? 'Stop Strain Polling' : 'Start Strain Polling';
+        }
+
+        // (Re)start or stop the browser-side data refresh timer
+        function handlePollingTimer(enabled) {
+          if (enabled) {
+            if (!pollingInterval) {
+              updateStrainDisplay();                 // immediate fetch
+              pollingInterval = setInterval(updateStrainDisplay, POLL_INTERVAL);
+            }
+          } else if (pollingInterval) {
+            clearInterval(pollingInterval);
+            pollingInterval = null;
+          }
+        }
+
         async function fetchWhoopData(endpoint) {
           const loadingEl = document.querySelector('.loading');
           const dataDisplay = document.getElementById('data-display');
@@ -397,20 +499,38 @@ app.get('/', (req, res) => {
           }
         }
 
-        function toggleStrainPolling() {
+        async function toggleStrainPolling() {
           const button = document.getElementById('pollStrainButton');
-          if (pollingInterval) {
-            clearInterval(pollingInterval);
-            pollingInterval = null;
-            button.textContent = 'Start Strain Polling';
-            button.classList.remove('active');
-          } else {
-            updateStrainDisplay();
-            pollingInterval = setInterval(updateStrainDisplay, 60000);
-            button.textContent = 'Stop Strain Polling';
-            button.classList.add('active');
+          const currentlyActive = button.classList.contains('active');
+          try {
+            const response = await fetch('/settings/strain-polling', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ enabled: !currentlyActive })
+            });
+            const { enabled } = await response.json();
+            updateButtonUI(enabled);
+            handlePollingTimer(enabled);
+          } catch (err) {
+            console.error('Failed to toggle polling', err);
           }
         }
+
+        // On initial page load, query current state once
+        document.addEventListener('DOMContentLoaded', async () => {
+          try {
+            const response = await fetch('/settings/strain-polling', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ enabled: false }) // query-only
+            });
+            const { enabled } = await response.json();
+            updateButtonUI(enabled);
+            handlePollingTimer(enabled);
+          } catch (err) {
+            console.error('Error fetching initial polling state', err);
+          }
+        });
       </script>
     </head>
     <body>
@@ -422,7 +542,7 @@ app.get('/', (req, res) => {
             <button class="button" onclick="fetchWhoopData('/whoop-data')">Fetch Profile Data</button>
             <button class="button" onclick="fetchWhoopData('/body-stats')">Fetch Body Stats</button>
             <button id="pollStrainButton" class="button" onclick="toggleStrainPolling()">Start Strain Polling</button>
-            <a href="/logout" class="button logout">Logout</a>
+            <a href="/disconnect" class="button logout" onclick="return confirm('This will stop background strain monitoring. Are you sure?')">Disconnect WHOOP</a>
             <div class="loading">Loading data...</div>
             <div id="strain-display"></div>
             <pre id="data-display"></pre>
@@ -436,18 +556,6 @@ app.get('/', (req, res) => {
     </body>
     </html>
   `);
-});
-
-// Protected route example
-app.get('/profile', (req, res) => {
-  if (!req.user || !req.user.isAuthenticated) {
-    return res.status(401).json({ error: 'Not authenticated' });
-  }
-  
-  res.json({
-    message: 'Protected profile data',
-    user: req.user
-  });
 });
 
 // WHOOP data route
@@ -487,12 +595,8 @@ app.get('/current-strain', async (req, res) => {
   }
 
   try {
-    const now = new Date();
-    const start = new Date(now - 60 * 60 * 1000).toISOString();
-    const end = now.toISOString();
-    
     const data = await makeWhoopApiCall(
-      `/developer/v1/cycle?start=${start}&end=${end}&limit=1`,
+      `/developer/v1/cycle?limit=1`,
       req.user.userId
     );
 
@@ -529,44 +633,108 @@ app.get('/current-strain', async (req, res) => {
   }
 });
 
-// Logout route
-app.get('/logout', async (req, res) => {
-  if (req.user && req.user.userId) {
-    // Optionally clean up user tokens on logout
-    try {
-      await tokenStorage.delete(req.user.userId);
-      console.log(`Cleaned up tokens for user: ${req.user.userId}`);
-    } catch (error) {
-      console.error('Error cleaning up tokens:', error);
-    }
+// Add new settings endpoints
+// ------------------------------------------------------------------
+// Strain polling settings endpoints
+// ------------------------------------------------------------------
+app.post('/settings/strain-polling', async (req, res) => {
+  if (!req.user || !req.user.isAuthenticated) {
+    return res.status(401).json({ error: 'Not authenticated' });
   }
+  const { enabled } = req.body;
+  const newState = !!enabled;
+  await tokenStorage.set(req.user.userId, { strainPollingEnabled: newState });
+
+  // Update per-user background worker
+  if (newState) {
+    strainManager.startUserPolling(req.user.userId);
+  } else {
+    strainManager.stopUserPolling(req.user.userId);
+  }
+
+  res.json({ enabled: newState });
+});
+
+// Remove session and delete tokens
+app.get('/disconnect', async (req, res) => {
+  if (!req.user || !req.user.isAuthenticated) {
+    return res.status(401).json({ error: 'Not authenticated' });
+  }
+
+  try {
+    // Delete stored tokens
+    await tokenStorage.delete(req.user.userId);
+    // Stop background polling job
+    strainManager.stopUserPolling(req.user.userId);
+    console.log(`Disconnected WHOOP access for user: ${req.user.userId}`);
+    
+    // Log out the user session
+    req.logout((err) => {
+      if (err) {
+        return res.status(500).json({ error: 'Logout failed' });
+      }
+      res.redirect('/?disconnected=true');
+    });
+  } catch (error) {
+    console.error('Error disconnecting WHOOP:', error);
+    res.status(500).json({ error: 'Failed to disconnect WHOOP access' });
+  }
+});
+
+// Start server
+let strainPollerInterval;
+
+app.listen(PORT, () => {
+  console.log(`Server running on http://localhost:${PORT}`);
+  console.log('Visit the URL to start the OAuth flow');
   
-  req.logout((err) => {
-    if (err) {
-      return res.status(500).json({ error: 'Logout failed' });
-    }
-    res.redirect('/');
-  });
+  // Initialize strain poller after server is ready
+  if (process.env.ENABLE_STRAIN_WORKER === 'true') {
+    // Bootstrap per-user polling for users who had it enabled
+    (async () => {
+      const allTokens = await tokenStorage.getAll();
+      const enabledUsers = [];
+      for (const [uid, enc] of Object.entries(allTokens)) {
+        try {
+          const decrypted = JSON.parse(tokenStorage.decrypt(enc));
+          if (decrypted.strainPollingEnabled) enabledUsers.push(uid);
+        } catch (_) {
+          // ignore corrupt or unreadable entries
+        }
+      }
+      strainManager.bootstrap(enabledUsers);
+      console.log(`Strain polling commenced for ${enabledUsers.length} users`);
+    })();
+  }
 });
 
-// Health check endpoint
-app.get('/health', (req, res) => {
-  res.json({ 
-    status: 'healthy', 
-    timestamp: new Date().toISOString(),
-    uptime: process.uptime()
-  });
-});
-
-// Error handling middleware
-app.use((err, req, res, next) => {
-  console.error('Error:', err);
-  res.status(500).json({ error: 'Something went wrong!' });
-});
-
-// Graceful shutdown
+// Graceful shutdown (Ctrl+C)
 process.on('SIGINT', async () => {
   console.log('Received SIGINT, shutting down gracefully...');
+  
+  // Stop all active strain pollers
+  strainManager.shutdown();
+  console.log('All strain pollers stopped');
+  
+  // Clean up all sessions (except .gitkeep)
+  try {
+    const fs = require('fs-extra');
+    const path = require('path');
+    const sessionsDir = path.join(__dirname, 'sessions');
+    
+    if (await fs.pathExists(sessionsDir)) {
+      const files = await fs.readdir(sessionsDir);
+      const sessionFiles = files.filter(file => file !== '.gitkeep');
+      
+      for (const file of sessionFiles) {
+        await fs.remove(path.join(sessionsDir, file));
+      }
+      
+      console.log(`All sessions cleared (${sessionFiles.length} files removed)`);
+    }
+  } catch (error) {
+    console.error('Error clearing sessions:', error);
+  }
   
   // Clean up expired tokens
   try {
@@ -577,10 +745,4 @@ process.on('SIGINT', async () => {
   }
   
   process.exit(0);
-});
-
-// Start server
-app.listen(PORT, () => {
-  console.log(`Server running on http://localhost:${PORT}`);
-  console.log('Visit the URL to start the OAuth flow');
 });

@@ -1,185 +1,95 @@
-# WHOOP Dashboard App
+# WHOOP Dashboard
 
-A Node.js application that integrates with the WHOOP API to track fitness data, handle webhooks, and provide a web dashboard for monitoring workouts, sleep, and recovery metrics.
+A Node.js application that integrates with the WHOOP API to display fitness data and stream it to Foundry for analysis.
 
 ## Features
 
-- **OAuth 2.0 Authentication** with WHOOP API
-- **Persistent Sessions** using file-based storage
-- **Real-time Webhooks** for workout, sleep, and recovery data
-- **Token Management** with automatic refresh
-- **Web Dashboard** for data visualization
-- **Strain Monitoring** with real-time polling
-- **Foundry Integration** for data forwarding
+- OAuth 2.0 authentication with WHOOP
+- Real-time strain monitoring with configurable alerts
+- Background strain polling (continues even when user is logged out)
+- Webhook support for workout, sleep, and recovery data
+- Automatic data streaming to Foundry datastream
+- Session management with encrypted token storage
 
-## Quick Start
+## Background Strain Monitoring
 
-1. **Clone the repository**
-   ```bash
-   git clone <your-repo-url>
-   cd WHOOP_APP
-   ```
+The app includes a background worker that continuously monitors strain data for all authenticated users:
 
-2. **Install dependencies**
-   ```bash
-   npm install
-   ```
+- Polls WHOOP API every 60 seconds for current strain data
+- Sends strain data to Foundry automatically
+- Triggers alerts when strain target (default: 18.0) is reached
+- Continues monitoring even when users are logged out or have closed the browser
 
-3. **Set up environment variables**
-   ```bash
-   cp .env.example .env
-   ```
-   Edit `.env` with your WHOOP API credentials:
-   - `CLIENT_ID`: Your WHOOP Developer App Client ID
-   - `CLIENT_SECRET`: Your WHOOP Developer App Client Secret
-   - `CALLBACK_URL`: OAuth callback URL (default: `http://localhost:3000/callback`)
+### Configuration
 
-4. **Run the application**
-   ```bash
-   node Project/app.js
-   ```
-
-5. **Access the dashboard**
-   Open `http://localhost:3000` in your browser
-
-## Setup Instructions
-
-### 1. WHOOP Developer Account
-
-1. Create a developer account at [WHOOP Developer Portal](https://developer.whoop.com/)
-2. Create a new application
-3. Note your Client ID and Client Secret
-4. Set the redirect URI to `http://localhost:3000/callback`
-
-### 2. Environment Configuration
-
-Copy `.env.example` to `.env` and configure:
+Set the following environment variable to enable background strain monitoring:
 
 ```bash
-# Required
-CLIENT_ID=your_whoop_client_id_here
-CLIENT_SECRET=your_whoop_client_secret_here
-
-# Optional
-CALLBACK_URL=http://localhost:3000/callback
-SESSION_SECRET=your_random_32_character_secret_here
-PORT=3000
-NODE_ENV=development
-
-# Foundry Integration (optional)
-FOUNDRY_API_URL=https://your-foundry-instance.com
-FOUNDRY_API_TOKEN=your_foundry_token
+ENABLE_STRAIN_WORKER=true
 ```
 
-### 3. Webhook Configuration
+The strain target can be modified in `Project/worker/strainPoller.js` by changing the `STRAIN_TARGET` constant.
 
-To receive real-time updates from WHOOP:
+## Setup
 
-1. In your WHOOP developer app, set the webhook URL to your public endpoint
-2. The app handles these webhook events:
-   - `workout.updated` / `workout.deleted`
-   - `sleep.updated` / `sleep.deleted`
-   - `recovery.updated` / `recovery.deleted`
+1. Install dependencies:
+```bash
+npm install
+```
+
+2. Create a `.env` file with your WHOOP API credentials:
+```
+CLIENT_ID=your_whoop_client_id
+CLIENT_SECRET=your_whoop_client_secret
+CALLBACK_URL=http://localhost:3000/callback
+FOUNDRY_STREAM_URI=your_foundry_stream_uri
+FOUNDRY_TOKEN=your_foundry_token
+SESSION_SECRET=your_session_secret
+ENABLE_STRAIN_WORKER=true
+```
+
+3. Run the application:
+```bash
+cd Project
+node app.js
+```
+
+## Usage
+
+1. Navigate to `http://localhost:3000`
+2. Click "Authenticate with WHOOP" to log in
+3. Use the dashboard to view data and start strain polling
+4. Background strain monitoring will continue automatically
+
+### Logout vs Disconnect
+
+- **Logout**: Ends the web session but preserves tokens for background monitoring
+- **Disconnect WHOOP**: Completely revokes access and stops background monitoring
+
+## API Endpoints
+
+- `GET /` - Dashboard homepage
+- `GET /auth/whoop` - Initiate WHOOP OAuth flow
+- `GET /callback` - OAuth callback handler
+- `GET /whoop-data` - Fetch user profile data
+- `GET /body-stats` - Fetch body measurement data
+- `GET /current-strain` - Get current strain data
+- `GET /logout` - Logout (preserves background monitoring)
+- `GET /disconnect` - Fully disconnect WHOOP access
+- `POST /webhook` - Handle WHOOP webhooks
+- `GET /health` - Health check endpoint
 
 ## Architecture
 
-### Session Management
-- **File-based sessions** persist across server restarts
-- **Secure token storage** separate from session data
-- **Automatic token refresh** handles expired credentials
+- **Main App** (`app.js`): Express server with OAuth and API routes
+- **Background Worker** (`worker/strainPoller.js`): Continuous strain monitoring
+- **Token Storage** (`utils/tokenStorage.js`): Encrypted token persistence
+- **WHOOP Utils** (`utils/whoop.js`): API client with token refresh
+- **Foundry Utils** (`utils/foundry.js`): Data streaming to Foundry
 
-### Data Storage
-```
-Project/
-├── data/
-│   ├── tokens.json     # OAuth tokens (gitignored)
-│   └── .gitkeep
-├── sessions/           # Session files (gitignored)
-│   └── .gitkeep
-└── utils/
-    ├── tokenStorage.js # Token management
-    ├── oauth.js        # OAuth handling
-    ├── whoop.js        # WHOOP API calls
-    └── ...
-```
+## Security
 
-### API Endpoints
-
-- `GET /` - Main dashboard
-- `GET /auth/whoop` - Initiate OAuth flow
-- `GET /callback` - OAuth callback
-- `GET /profile` - User profile data
-- `GET /whoop-data` - WHOOP profile data
-- `GET /body-stats` - Body measurement data
-- `GET /current-strain` - Real-time strain data
-- `POST /webhook` - WHOOP webhook endpoint
-- `GET /health` - Health check
-- `GET /logout` - Logout and cleanup
-
-## Development
-
-### Running in Development
-```bash
-# With auto-restart
-npm install -g nodemon
-nodemon Project/app.js
-
-# With debugging
-DEBUG=* node Project/app.js
-```
-
-### Testing Webhooks
-Use ngrok to expose your local server:
-```bash
-ngrok http 3000
-# Use the HTTPS URL for webhook configuration
-```
-
-## Production Deployment
-
-### Environment Variables
-Set `NODE_ENV=production` for:
-- Secure cookies (HTTPS only)
-- Enhanced security headers
-- Optimized logging
-
-### Scaling Considerations
-- Replace file-based sessions with Redis/database
-- Use environment-specific token storage
-- Implement proper logging and monitoring
-- Set up process managers (PM2, etc.)
-
-## Security Features
-
-- **HttpOnly cookies** prevent XSS attacks
-- **Secure session storage** with encryption
-- **Token separation** from session data
-- **Automatic cleanup** of expired tokens
-- **Environment-based security** settings
-
-## Monitoring
-
-- Health check endpoint: `GET /health`
-- Comprehensive logging for debugging
-- Graceful shutdown handling
-- Token expiration monitoring
-
-## Contributing
-
-1. Fork the repository
-2. Create a feature branch
-3. Make your changes
-4. Test thoroughly
-5. Submit a pull request
-
-## License
-
-This project is for educational and portfolio purposes.
-
-## Support
-
-For questions or issues:
-1. Check the WHOOP Developer Documentation
-2. Review the application logs
-3. Ensure all environment variables are set correctly
-4. Verify webhook configuration if using real-time features 
+- Tokens are encrypted at rest using AES-256-GCM
+- Session cookies are HTTP-only and secure in production
+- Webhook signatures are validated
+- Token cleanup on graceful shutdown 
