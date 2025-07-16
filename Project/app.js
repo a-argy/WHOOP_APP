@@ -524,11 +524,7 @@ app.get('/', (req, res) => {
         // On initial page load, query current state once
         document.addEventListener('DOMContentLoaded', async () => {
           try {
-            const response = await fetch('/settings/strain-polling', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ enabled: false }) // query-only
-            });
+            const response = await fetch('/settings/strain-polling');
             const { enabled } = await response.json();
             updateButtonUI(enabled);
             handlePollingTimer(enabled);
@@ -662,13 +658,26 @@ app.get('/events/strain', (req, res) => {
   req.on('close', () => strainEmitter.off('strain', send));
 });
 
-// Strain polling settings endpoints
+// Query current polling state (no mutation)
+app.get('/settings/strain-polling', async (req, res) => {
+  if (!req.user || !req.user.isAuthenticated) {
+    return res.status(401).json({ error: 'Not authenticated' });
+  }
+  const tokenData = await tokenStorage.get(req.user.userId);
+  const enabled = !!tokenData?.strainPollingEnabled;
+  res.json({ enabled });
+});
+
+// Enable / disable polling (mutating)
 app.post('/settings/strain-polling', async (req, res) => {
   if (!req.user || !req.user.isAuthenticated) {
     return res.status(401).json({ error: 'Not authenticated' });
   }
   const { enabled } = req.body;
-  const newState = !!enabled;
+  if (typeof enabled !== 'boolean') {
+    return res.status(400).json({ error: 'enabled boolean required' });
+  }
+  const newState = enabled;
   await tokenStorage.set(req.user.userId, { strainPollingEnabled: newState });
 
   // Update per-user background worker
@@ -688,12 +697,13 @@ app.get('/disconnect', async (req, res) => {
   }
 
   try {
+    // Stop background polling job first to avoid race conditions
+    strainManager.stopUserPolling(req.user.userId);
+
     // Delete stored tokens
     await tokenStorage.delete(req.user.userId);
-    // Stop background polling job
-    strainManager.stopUserPolling(req.user.userId);
     console.log(`Disconnected WHOOP access for user: ${req.user.userId}`);
-    
+
     // Log out the user session
     req.logout((err) => {
       if (err) {

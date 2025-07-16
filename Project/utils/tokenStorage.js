@@ -117,12 +117,7 @@ class TokenStorage {
         try {
           const decryptedData = this.decrypt(encryptedData);
           const tokenData = JSON.parse(decryptedData);
-          
-          // Remove expired tokens
-          if (tokenData.expiresAt && tokenData.expiresAt < Date.now()) {
-            delete tokens[userId];
-            console.log(`Cleaned up expired token for user: ${userId}`);
-          }
+          delete tokens[userId];
         } catch (error) {
           console.error(`Error processing token for user ${userId}:`, error);
           delete tokens[userId];

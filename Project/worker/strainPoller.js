@@ -4,8 +4,8 @@ const { makeWhoopApiCall } = require('../utils/whoop');
 const { sendToFoundry } = require('../utils/foundry');
 const { EventEmitter } = require('events');
 
-const POLL_INTERVAL = 1000 * 60 * 15;  // 15 minutes
-
+// const POLL_INTERVAL = 1000 * 60 * 15;  // 15 minutes
+const POLL_INTERVAL = 1000 * 5;  // 5 seconds
 // In-memory map of userId -> interval handle
 const activeTimers = new Map();
 // Local event emitter to broadcast strain updates
