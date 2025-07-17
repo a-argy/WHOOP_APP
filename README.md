@@ -1,6 +1,6 @@
-# WHOOP Dashboard
+# WHOOP Dashboard – Concussion Symptom Monitoring
 
-A Node.js application that integrates with the WHOOP API to display fitness data and stream it to Foundry for analysis.
+A Node.js application that integrates with the WHOOP API to track athlete strain and other biometrics for **concussion symptom monitoring**, and stream the data to Foundry for analysis.
 
 ## Features
 
@@ -93,3 +93,35 @@ node app.js
 - Session cookies are HTTP-only and secure in production
 - Webhook signatures are validated
 - Token cleanup on graceful shutdown 
+
+## Deploying to Render (Free Tier)
+
+The app can run 24 × 7 on Render’s free web-service instance – perfect for lightweight polling and webhook handling.
+
+1. **Fork / push** this repo to GitHub.
+2. **Create a new service** at <https://dashboard.render.com> → *New* → *Web Service*.
+3. **Connect the repo** and choose the `main` branch.
+4. **Instance type:** *Free* (512 MB RAM).
+5. **Build command:**
+   ```bash
+   npm install
+   ```
+6. **Start command:**
+   ```bash
+   node Project/app.js
+   ```
+7. **Environment variables** (Render → *Environment* tab):
+   ```
+   CLIENT_ID=…
+   CLIENT_SECRET=…
+   CALLBACK_URL=https://<your-service>.onrender.com/callback
+   FOUNDRY_STREAM_URI=…
+   FOUNDRY_TOKEN=…
+   SESSION_SECRET=…
+   ENABLE_STRAIN_WORKER=true
+   WHOOP_API_HOSTNAME=https://api.prod.whoop.com
+   ```
+8. **Add the callback URL** (`https://<your-service>.onrender.com/callback`) to your WHOOP developer portal.
+9. Click **Deploy** – after the build finishes your app is live at `https://<your-service>.onrender.com`.
+
+**Cold-start note:** the free instance sleeps after ~15 min with no incoming requests; the first request (or webhook) may be delayed ~50 s while it warms up. Upgrade to a paid plan if you need zero cold-start delay. 
