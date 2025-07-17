@@ -744,15 +744,15 @@ app.listen(PORT, () => {
   }
 });
 
-// Graceful shutdown (Ctrl+C)
-process.on('SIGINT', async () => {
-  console.log('Received SIGINT, shutting down gracefully...');
-  
-  // Stop all active strain pollers
+// --- graceful-shutdown helper (extract existing logic into a function) ---
+async function gracefulShutdown(signal) {
+  console.log(`Received ${signal}, shutting down gracefully…`);
+
+  // Stop strain workers
   strainManager.shutdown();
   console.log('All strain pollers stopped');
-  
-  // Clean up all sessions (except .gitkeep)
+
+  // Clear session files
   try {
     const fs = require('fs-extra');
     const path = require('path');
@@ -771,13 +771,17 @@ process.on('SIGINT', async () => {
   } catch (error) {
     console.error('Error clearing sessions:', error);
   }
-  
-  // Clean up expired tokens
+
+  // Clean up expired/lingering tokens
   try {
     await tokenStorage.cleanup();
-  } catch (error) {
-    console.error('Error during cleanup:', error);
+  } catch (err) {
+    console.error('Error during token cleanup:', err);
   }
-  
+
   process.exit(0);
-});
+}
+
+// Handle both local Ctrl-C and Render’s termination signal
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
