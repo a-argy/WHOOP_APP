@@ -748,35 +748,51 @@ app.listen(PORT, () => {
 async function gracefulShutdown(signal) {
   console.log(`Received ${signal}, shutting down gracefully…`);
 
-  // Stop strain workers
+  const shutdownReason = process.env.RENDER_SHUTDOWN_REASON || 'UNKNOWN';
+  console.log(`Render shutdown reason: ${shutdownReason}`);
+
+  // Always stop background workers so we don't leave timers running in the container.
   strainManager.shutdown();
   console.log('All strain pollers stopped');
 
-  // Clear session files
-  try {
-    const fs = require('fs-extra');
-    const path = require('path');
-    const sessionsDir = path.join(__dirname, 'sessions');
-    
-    if (await fs.pathExists(sessionsDir)) {
-      const files = await fs.readdir(sessionsDir);
-      const sessionFiles = files.filter(file => file !== '.gitkeep');
-      
-      for (const file of sessionFiles) {
-        await fs.remove(path.join(sessionsDir, file));
-      }
-      
-      console.log(`All sessions cleared (${sessionFiles.length} files removed)`);
-    }
-  } catch (error) {
-    console.error('Error clearing sessions:', error);
-  }
+  /*
+   * If Render is merely idling the service (free tier sleep) we want to keep
+   * session and token files around so that the service can resume work quickly
+   * when it starts back up.
+   *
+   * For any other reason – deploys, manual restarts, failures, etc. – we
+   * proceed with the full cleanup.
+   */
+  const shouldCleanupPersistentData = shutdownReason !== 'IDLE';
 
-  // Clean up expired/lingering tokens
-  try {
-    await tokenStorage.cleanup();
-  } catch (err) {
-    console.error('Error during token cleanup:', err);
+  if (shouldCleanupPersistentData) {
+    try {
+      const fs = require('fs-extra');
+      const path = require('path');
+      const sessionsDir = path.join(__dirname, 'sessions');
+
+      if (await fs.pathExists(sessionsDir)) {
+        const files = await fs.readdir(sessionsDir);
+        const sessionFiles = files.filter((file) => file !== '.gitkeep');
+
+        for (const file of sessionFiles) {
+          await fs.remove(path.join(sessionsDir, file));
+        }
+
+        console.log(`All sessions cleared (${sessionFiles.length} files removed)`);
+      }
+    } catch (error) {
+      console.error('Error clearing sessions:', error);
+    }
+
+    // Clean up expired tokens
+    try {
+      await tokenStorage.cleanup();
+    } catch (error) {
+      console.error('Error during token cleanup:', error);
+    }
+  } else {
+    console.log('Skipping session and token cleanup due to idle shutdown.');
   }
 
   process.exit(0);
