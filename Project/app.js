@@ -15,8 +15,15 @@ const { strainEmitter } = strainManager;
 
 const app = express();
 
-// Add body parser middleware for webhook JSON
-app.use(express.json());
+// Add body-parser that also keeps a copy of the raw body so we can verify
+// WHOOP webhook signatures (they require the exact byte-for-byte payload).
+app.use(express.json({
+  verify: (req, res, buf) => {
+    // Store raw body on the request for later verification.  We do this for
+    // every request but only the /webhook handler actually uses it.
+    req.rawBody = buf;
+  }
+}));
 
 // Environment variables
 const WHOOP_API_HOSTNAME = process.env.WHOOP_API_HOSTNAME || 'https://api.prod.whoop.com';
@@ -198,7 +205,8 @@ app.post('/webhook', async (req, res) => {
   // Validate webhook signature
   const signature = req.headers['x-whoop-signature'];
   const timestamp = req.headers['x-whoop-signature-timestamp'];
-  if (!validateWebhookSignature(timestamp, req.body, signature)) {
+
+  if (!validateWebhookSignature(timestamp, req.rawBody, signature)) {
     console.error('Invalid webhook signature');
     return res.status(401).json({ error: 'Invalid signature' });
   }
