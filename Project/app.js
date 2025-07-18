@@ -153,7 +153,7 @@ const whoopOAuthConfig = {
 // inside `deserializeUser` to keep sessions lean and up-to-date.
 // ------------------------------------------------------------
 passport.serializeUser((user, done) => {
-  done(null, user); // ↩️  replace with `user.id` in production
+  done(null, user); 
 });
 
 // ------------------------------------------------------------
@@ -168,7 +168,7 @@ passport.serializeUser((user, done) => {
 // match – the two are a tightly-coupled pair.
 // ------------------------------------------------------------
 passport.deserializeUser((user, done) => {
-  done(null, user); // ↩️  would usually be `User.findById(user, done)`
+  done(null, user);
 });
 
 // Create and configure the WHOOP OAuth 2.0 strategy with getUser as the 'verify' function (happens after fetchProfile) 
@@ -744,60 +744,60 @@ app.listen(PORT, () => {
   }
 });
 
-// --- graceful-shutdown helper (extract existing logic into a function) ---
-async function gracefulShutdown(signal) {
-  console.log(`Received ${signal}, shutting down gracefully…`);
+// // --- graceful-shutdown helper (extract existing logic into a function) ---
+// async function gracefulShutdown(signal) {
+//   console.log(`Received ${signal}, shutting down gracefully…`);
 
-  const shutdownReason = process.env.RENDER_SHUTDOWN_REASON || 'UNKNOWN';
-  console.log(`Render shutdown reason: ${shutdownReason}`);
+//   const shutdownReason = process.env.RENDER_SHUTDOWN_REASON || 'UNKNOWN';
+//   console.log(`Render shutdown reason: ${shutdownReason}`);
 
-  // Always stop background workers so we don't leave timers running in the container.
-  strainManager.shutdown();
-  console.log('All strain pollers stopped');
+//   // Always stop background workers so we don't leave timers running in the container.
+//   strainManager.shutdown();
+//   console.log('All strain pollers stopped');
 
-  /*
-   * If Render is merely idling the service (free tier sleep) we want to keep
-   * session and token files around so that the service can resume work quickly
-   * when it starts back up.
-   *
-   * For any other reason – deploys, manual restarts, failures, etc. – we
-   * proceed with the full cleanup.
-   */
-  const shouldCleanupPersistentData = shutdownReason !== 'IDLE';
+//   /*
+//    * If Render is merely idling the service (free tier sleep) we want to keep
+//    * session and token files around so that the service can resume work quickly
+//    * when it starts back up.
+//    *
+//    * For any other reason – deploys, manual restarts, failures, etc. – we
+//    * proceed with the full cleanup.
+//    */
+//   const shouldCleanupPersistentData = shutdownReason !== 'IDLE';
 
-  if (shouldCleanupPersistentData) {
-    try {
-      const fs = require('fs-extra');
-      const path = require('path');
-      const sessionsDir = path.join(__dirname, 'sessions');
+//   if (shouldCleanupPersistentData) {
+//     try {
+//       const fs = require('fs-extra');
+//       const path = require('path');
+//       const sessionsDir = path.join(__dirname, 'sessions');
 
-      if (await fs.pathExists(sessionsDir)) {
-        const files = await fs.readdir(sessionsDir);
-        const sessionFiles = files.filter((file) => file !== '.gitkeep');
+//       if (await fs.pathExists(sessionsDir)) {
+//         const files = await fs.readdir(sessionsDir);
+//         const sessionFiles = files.filter((file) => file !== '.gitkeep');
 
-        for (const file of sessionFiles) {
-          await fs.remove(path.join(sessionsDir, file));
-        }
+//         for (const file of sessionFiles) {
+//           await fs.remove(path.join(sessionsDir, file));
+//         }
 
-        console.log(`All sessions cleared (${sessionFiles.length} files removed)`);
-      }
-    } catch (error) {
-      console.error('Error clearing sessions:', error);
-    }
+//         console.log(`All sessions cleared (${sessionFiles.length} files removed)`);
+//       }
+//     } catch (error) {
+//       console.error('Error clearing sessions:', error);
+//     }
 
-    // Clean up expired tokens
-    try {
-      await tokenStorage.cleanup();
-    } catch (error) {
-      console.error('Error during token cleanup:', error);
-    }
-  } else {
-    console.log('Skipping session and token cleanup due to idle shutdown.');
-  }
+//     // Clean up expired tokens
+//     try {
+//       await tokenStorage.cleanup();
+//     } catch (error) {
+//       console.error('Error during token cleanup:', error);
+//     }
+//   } else {
+//     console.log('Skipping session and token cleanup due to idle shutdown.');
+//   }
 
-  process.exit(0);
-}
+//   process.exit(0);
+// }
 
-// Handle both local Ctrl-C and Render’s termination signal
-process.on('SIGINT', () => gracefulShutdown('SIGINT'));
-process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+// // Handle both local Ctrl-C and Render’s termination signal
+// process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+// process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
