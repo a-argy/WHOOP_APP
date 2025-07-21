@@ -132,10 +132,52 @@ async function fetchRecoveryData(cycleId, userId) {
   return makeWhoopApiCall(`/developer/v1/cycle/${cycleId}/recovery`, userId);
 }
 
+/**
+ * Revokes access token to stop webhook delivery and disconnect user from WHOOP
+ * @param {string} userId - User ID to revoke access for
+ * @returns {Promise<boolean>} - Success status
+ */
+async function revokeAccessToken(userId) {
+  try {
+    const userToken = await tokenStorage.get(userId);
+    if (!userToken) {
+      console.log(`No token found for user ${userId} - already disconnected`);
+      return true;
+    }
+
+    // Revoke the access token with WHOOP
+    const response = await fetch(`${WHOOP_API_HOSTNAME}/oauth/oauth2/revoke`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+      },
+      body: new URLSearchParams({
+        token: userToken.accessToken,
+        client_id: CLIENT_ID,
+        client_secret: CLIENT_SECRET
+      })
+    });
+
+    if (!response.ok) {
+      console.error(`Token revocation failed: ${response.status}`);
+      // Continue with local cleanup even if revocation fails
+    } else {
+      console.log(`Successfully revoked WHOOP access for user ${userId}`);
+    }
+
+    return true;
+  } catch (error) {
+    console.error(`Error revoking access token for user ${userId}:`, error);
+    // Don't throw - we still want to clean up locally
+    return false;
+  }
+}
+
 module.exports = {
     checkAndRefresh,
     fetchWorkoutData,
     fetchSleepData,
     fetchRecoveryData,
-    makeWhoopApiCall
+    makeWhoopApiCall,
+    revokeAccessToken
 };

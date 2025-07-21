@@ -7,7 +7,7 @@ const FileStore = require('session-file-store')(session);
 const crypto = require('crypto');
 const { validateWebhookSignature } = require('./utils/webhook');
 const { sendToFoundry } = require('./utils/foundry');
-const { fetchWorkoutData, fetchSleepData, fetchRecoveryData, makeWhoopApiCall } = require('./utils/whoop');
+const { fetchWorkoutData, fetchSleepData, fetchRecoveryData, makeWhoopApiCall, revokeAccessToken } = require('./utils/whoop');
 const { getUser, fetchProfile } = require('./utils/oauth');
 const tokenStorage = require('./utils/tokenStorage');
 const strainManager = require('./worker/strainPoller');
@@ -714,14 +714,18 @@ app.get('/disconnect', async (req, res) => {
   }
 
   try {
-    // Stop background polling job first to avoid race conditions
+    // STEP 1: Stop background polling job first to avoid race conditions
     strainManager.stopUserPolling(req.user.userId);
 
-    // Delete stored tokens
+    // STEP 2: Revoke access token with WHOOP to stop webhook delivery
+    // This tells WHOOP "this user is no longer using the app" so webhooks stop
+    await revokeAccessToken(req.user.userId);
+
+    // STEP 3: Delete stored tokens locally
     await tokenStorage.delete(req.user.userId);
     console.log(`Disconnected WHOOP access for user: ${req.user.userId}`);
 
-    // Log out the user session
+    // STEP 4: Log out the user session
     req.logout((err) => {
       if (err) {
         return res.status(500).json({ error: 'Logout failed' });
