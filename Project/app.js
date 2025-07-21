@@ -225,7 +225,7 @@ app.post('/webhook', async (req, res) => {
             webhook_received_at: new Date().toISOString()
           });
           
-          console.log('New workout update received and data fetched:');
+          console.log('New workout update received and data sent to Foundry:');
           console.log('User ID:', user_id);
           console.log('Workout ID:', id);
           console.log('-------------------');
@@ -266,7 +266,7 @@ app.post('/webhook', async (req, res) => {
             webhook_received_at: new Date().toISOString()
           });
           
-          console.log('New sleep update received and data fetched:');
+          console.log('New sleep update received and data sent to Foundry:');
           console.log('User ID:', user_id);
           console.log('Sleep ID:', id);
           console.log('-------------------');
@@ -307,7 +307,7 @@ app.post('/webhook', async (req, res) => {
             webhook_received_at: new Date().toISOString()
           });
           
-          console.log('New recovery update received and data fetched:');
+          console.log('New recovery update received and data sent to Foundry:');
           console.log('User ID:', user_id);
           console.log('Cycle ID:', id);
           console.log('-------------------');
@@ -438,9 +438,6 @@ app.get('/', (req, res) => {
         }
       </style>
       <script>
-        let pollingInterval;
-        const POLL_INTERVAL = 1000 * 60 * 15;  // 15 minutes – matches backend
-
         // Toggle the strain-polling button appearance/label
         function updateButtonUI(enabled) {
           const button = document.getElementById('pollStrainButton');
@@ -448,16 +445,10 @@ app.get('/', (req, res) => {
           button.textContent = enabled ? 'Stop Strain Polling' : 'Start Strain Polling';
         }
 
-        // (Re)start or stop the browser-side data refresh timer
+        // One-off pull of /current-strain so the widget shows data
         function handlePollingTimer(enabled) {
           if (enabled) {
-            if (!pollingInterval) {
-              updateStrainDisplay();                 // immediate fetch
-              pollingInterval = setInterval(updateStrainDisplay, POLL_INTERVAL);
-            }
-          } else if (pollingInterval) {
-            clearInterval(pollingInterval);
-            pollingInterval = null;
+            updateStrainDisplay();
           }
         }
 
@@ -541,12 +532,17 @@ app.get('/', (req, res) => {
           }
         });
 
-        // Open SSE channel for live updates
+        // BROWSER SIDE: Open persistent connection to server for real-time updates
+        // This is like calling a radio station and staying on the line to hear live broadcasts
         var strainEvents = new EventSource('/events/strain');
+        
+        // RECEIVE BROADCASTS: When server sends new strain data, this function runs
+        // The server's "send" function writes data, this "onmessage" function receives it
         strainEvents.onmessage = function (evt) {
            try {
+             // PARSE & DISPLAY: Convert JSON string back to object and update the UI
              var data = JSON.parse(evt.data);
-             renderStrain(data);
+             renderStrain(data);  // Update the strain widget immediately
            } catch (e) {
              console.error('Failed to parse strain event', e);
            }
@@ -649,24 +645,36 @@ app.get('/events/strain', (req, res) => {
     return res.sendStatus(401);
   }
 
+  // SETUP PHASE: Convert this HTTP response into a persistent streaming connection
+  // Think of this like "tuning into a radio station" - we're setting up to receive broadcasts
   res.set({
     'Cache-Control': 'no-cache',
-    'Content-Type': 'text/event-stream',
-    Connection: 'keep-alive'
+    'Content-Type': 'text/event-stream',  // Tell browser: "This is a live data stream, not a regular webpage"
+    Connection: 'keep-alive'              // Keep this HTTP connection open indefinitely
   });
-  res.flushHeaders();
+  res.flushHeaders();  // Send headers immediately so browser can start listening
 
+  // CREATE UNIQUE LISTENER: Each browser connection gets its own personal "radio receiver"
+  // This function will be called every time the background worker has new strain data
   const send = ({ userId, data }) => {
+    // FILTER: Only forward data meant for THIS specific browser's user
+    // (Like having your name called over the intercom - ignore if it's not for you)
     if (userId === req.user.userId) {
+      // DELIVER: Send the data through this browser's open connection in SSE format
       res.write('data:' + JSON.stringify(data) + '\n\n');
     }
   };
 
+  // REGISTER LISTENER: Add this browser's personal "send" function to the global broadcaster
+  // Now when strainEmitter.emit() happens, this function will be called along with all others
   strainEmitter.on('strain', send);
+  
+  // CLEANUP: When browser disconnects (tab closed, navigate away, etc.), remove the dead listener
+  // Prevents memory leaks - like unsubscribing from a mailing list when you move
   req.on('close', () => strainEmitter.off('strain', send));
 });
 
-// Query current polling state (no mutation)
+// Query current polling state 
 app.get('/settings/strain-polling', async (req, res) => {
   if (!req.user || !req.user.isAuthenticated) {
     return res.status(401).json({ error: 'Not authenticated' });
@@ -676,7 +684,7 @@ app.get('/settings/strain-polling', async (req, res) => {
   res.json({ enabled });
 });
 
-// Enable / disable polling (mutating)
+// Enable / disable polling
 app.post('/settings/strain-polling', async (req, res) => {
   if (!req.user || !req.user.isAuthenticated) {
     return res.status(401).json({ error: 'Not authenticated' });
