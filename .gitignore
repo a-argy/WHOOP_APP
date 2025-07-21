@@ -1,5 +1,5 @@
 .env
 node_modules/
-sessions/
-Project/data/
+# sessions/
+# Project/data/
 *.log
