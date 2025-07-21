@@ -202,6 +202,7 @@ app.get('/callback',
 
 // Webhook endpoint
 app.post('/webhook', async (req, res) => {
+  console.log('Webhook landed');
   // Validate webhook signature
   const signature = req.headers['x-whoop-signature'];
   const timestamp = req.headers['x-whoop-signature-timestamp'];
