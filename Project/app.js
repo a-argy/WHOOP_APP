@@ -714,18 +714,18 @@ app.get('/disconnect', async (req, res) => {
   }
 
   try {
-    // STEP 1: Stop background polling job first to avoid race conditions
+    // Stop background polling job first to avoid race conditions
     strainManager.stopUserPolling(req.user.userId);
 
-    // STEP 2: Revoke access token with WHOOP to stop webhook delivery
+    // Revoke access token with WHOOP to stop webhook delivery
     // This tells WHOOP "this user is no longer using the app" so webhooks stop
     await revokeAccessToken(req.user.userId);
 
-    // STEP 3: Delete stored tokens locally
+    // Delete stored tokens locally
     await tokenStorage.delete(req.user.userId);
     console.log(`Disconnected WHOOP access for user: ${req.user.userId}`);
 
-    // STEP 4: Log out the user session
+    // Log out the user session
     req.logout((err) => {
       if (err) {
         return res.status(500).json({ error: 'Logout failed' });
@@ -749,19 +749,35 @@ app.listen(PORT, () => {
   if (process.env.ENABLE_STRAIN_WORKER === 'true') {
     // Bootstrap per-user polling for users who had it enabled
     (async () => {
+      console.log('🔍 Starting bootstrap process...');
+      console.log('ENABLE_STRAIN_WORKER:', process.env.ENABLE_STRAIN_WORKER);
+      
       const allTokens = await tokenStorage.getAll();
+      console.log(`📁 Found ${Object.keys(allTokens).length} total tokens in storage`);
+      
       const enabledUsers = [];
       for (const [uid, enc] of Object.entries(allTokens)) {
         try {
+          console.log(`🔓 Attempting to decrypt token for user ${uid}`);
           const decrypted = JSON.parse(tokenStorage.decrypt(enc));
-          if (decrypted.strainPollingEnabled) enabledUsers.push(uid);
-        } catch (_) {
-          // ignore corrupt or unreadable entries
+          console.log(`✅ Successfully decrypted token for user ${uid}`);
+          console.log(`⚙️  strainPollingEnabled: ${decrypted.strainPollingEnabled}`);
+          console.log(`🕒 Token expires at: ${new Date(decrypted.expiresAt).toISOString()}`);
+          
+          if (decrypted.strainPollingEnabled) {
+            enabledUsers.push(uid);
+            console.log(`✨ Added user ${uid} to enabled users list`);
+          }
+        } catch (error) {
+          console.error(`❌ Failed to decrypt token for user ${uid}:`, error.message);
         }
       }
       strainManager.bootstrap(enabledUsers);
-      console.log(`Strain polling commenced for ${enabledUsers.length} users`);
+      console.log(`🚀 Strain polling commenced for ${enabledUsers.length} users`);
     })();
+  } else {
+    console.log('⚠️  ENABLE_STRAIN_WORKER is not "true", skipping bootstrap');
+    console.log('Current value:', process.env.ENABLE_STRAIN_WORKER);
   }
 });
 
