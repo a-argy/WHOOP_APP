@@ -15,10 +15,10 @@ if (!CLIENT_SECRET) {
 }
 
 /**
- * Checks if token needs refresh and refreshes if necessary
+ * Gets a valid access token for the user (refreshes automatically if expired)
  * @param {string} user_id - User ID
- * @returns {Promise<string>} - Valid access token (either existing or refreshed)
- * @throws {Error} - When token refresh fails or API returns an error
+ * @returns {Promise<string>} - Valid access token
+ * @throws {Error} - When no token is found or refresh fails
  */
 async function checkAndRefresh(user_id) {
   try {
@@ -27,46 +27,11 @@ async function checkAndRefresh(user_id) {
       throw new Error(`No access token found for user: ${user_id}`);
     }
 
-    // Check if token needs refresh
-    if (Date.now() >= userToken.expiresAt) {
-      console.log(`Token expired for user ${user_id}, refreshing...`);
-      
-      const response = await fetch(`${WHOOP_API_HOSTNAME}/oauth/oauth2/token`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/x-www-form-urlencoded',
-        },
-        body: new URLSearchParams({
-          grant_type: 'refresh_token',
-          refresh_token: userToken.refreshToken,
-          client_id: CLIENT_ID,
-          client_secret: CLIENT_SECRET,
-          scope: 'offline'
-        })
-      });
-
-      if (!response.ok) {
-        throw new Error(`Token refresh failed: ${response.status}`);
-      }
-
-      const data = await response.json();
-      
-      // Update persistent storage with new tokens
-      await tokenStorage.set(user_id, {
-        accessToken: data.access_token,
-        refreshToken: data.refresh_token,
-        expiresAt: Date.now() + data.expires_in * 1000
-      });
-
-      console.log(`Token refreshed successfully for user ${user_id}`);
-      return data.access_token;
-    }
-
-    // Token is still valid, return existing access token
+    // tokenStorage.get() automatically handles refresh if needed
     return userToken.accessToken;
     
   } catch (error) {
-    console.error('Token refresh error:', error);
+    console.error('Error getting access token:', error);
     throw error;
   }
 }
@@ -139,7 +104,7 @@ async function fetchRecoveryData(cycleId, userId) {
  */
 async function revokeAccessToken(userId) {
   try {
-    const userToken = await tokenStorage.get(userId);
+    const userToken = await tokenStorage.getRaw(userId); // Use getRaw to avoid refresh
     if (!userToken) {
       console.log(`No token found for user ${userId} - already disconnected`);
       return true;
