@@ -96,7 +96,28 @@ node app.js
 
 ## Deploying to Render (Free Tier)
 
-The app can run 24 × 7 on Render’s free web-service instance – perfect for lightweight polling and webhook handling.
+The app is optimized for Render's free web-service tier, which spins down after 15 minutes of inactivity but automatically wakes up when webhooks arrive. This allows background strain and webhook monitoring without cost.
+
+### Pre-Deployment Setup (Required)
+
+**Important:** You must authenticate locally first to create the token file that enables automatic webhook bootstrap on Render.
+
+1. **Run locally and authenticate:**
+   ```bash
+   cd Project
+   node app.js
+   ```
+2. **Visit** `http://localhost:3000` and complete WHOOP authentication
+3. **Enable strain polling** if desired (this preference is saved to the token file)
+4. **Verify token file exists:** `Project/data/tokens.json` should now contain your encrypted tokens
+5. **Commit and push** the token file to your repository:
+   ```bash
+   git add Project/data/tokens.json
+   git commit -m "Add user tokens for Render bootstrap"
+   git push
+   ```
+
+### Render Deployment
 
 1. **Fork / push** this repo to GitHub.
 2. **Create a new service** at <https://dashboard.render.com> → *New* → *Web Service*.
@@ -124,4 +145,11 @@ The app can run 24 × 7 on Render’s free web-service instance – perfect for 
 8. **Add the callback URL** (`https://<your-service>.onrender.com/callback`) to your WHOOP developer portal.
 9. Click **Deploy** – after the build finishes your app is live at `https://<your-service>.onrender.com`.
 
-**Cold-start note:** the free instance sleeps after ~15 min with no incoming requests; the first request (or webhook) may be delayed ~50 s while it warms up. Upgrade to a paid plan if you need zero cold-start delay. 
+### How Free Tier Bootstrap Works
+
+- **Spin Down:** After 15 minutes of no web traffic, Render puts the service to sleep
+- **Wake Up:** WHOOP webhooks automatically wake the service 
+- **Bootstrap:** On startup, the app reads `tokens.json` and restarts strain polling for users who had it enabled
+- **Seamless Monitoring:** Background strain monitoring continues without any manual intervention
+
+**Note:** You'll need to re-authenticate through the web UI after each deployment (sessions don't persist), but webhook processing and background strain monitoring work automatically thanks to the persistent token storage. 

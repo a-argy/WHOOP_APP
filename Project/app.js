@@ -15,6 +15,14 @@ const { strainEmitter } = strainManager;
 
 const app = express();
 
+// Environment variables
+const WHOOP_API_HOSTNAME = process.env.WHOOP_API_HOSTNAME || 'https://api.prod.whoop.com';
+const CALLBACK_URL = process.env.CALLBACK_URL || 'http://localhost:3000/callback';
+const CLIENT_ID = process.env.CLIENT_ID;
+const CLIENT_SECRET = process.env.CLIENT_SECRET;
+const SESSION_SECRET = process.env.SESSION_SECRET || crypto.randomBytes(32).toString('hex');
+const PORT = process.env.PORT || 3000;
+
 // Add body-parser that also keeps a copy of the raw body so we can verify
 // WHOOP webhook signatures (they require the exact byte-for-byte payload).
 app.use(express.json({
@@ -24,14 +32,6 @@ app.use(express.json({
     req.rawBody = buf;
   }
 }));
-
-// Environment variables
-const WHOOP_API_HOSTNAME = process.env.WHOOP_API_HOSTNAME || 'https://api.prod.whoop.com';
-const CALLBACK_URL = process.env.CALLBACK_URL || 'http://localhost:3000/callback';
-const CLIENT_ID = process.env.CLIENT_ID;
-const CLIENT_SECRET = process.env.CLIENT_SECRET;
-const SESSION_SECRET = process.env.SESSION_SECRET || crypto.randomBytes(32).toString('hex');
-const PORT = process.env.PORT || 3000;
 
 // Validate required environment variables
 if (!CLIENT_ID) {
