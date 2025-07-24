@@ -1,5 +1,6 @@
 .env
 node_modules/
-# sessions/
+# render doesn't need session to enabled continuous wakeups, only the token
+sessions/
 # Project/data/
 *.log
