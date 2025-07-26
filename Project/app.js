@@ -641,7 +641,7 @@ app.get('/current-strain', async (req, res) => {
   }
 });
 
-// SSE endpoint for live strain updates
+// SSE endpoint for live strain updates on front-end
 app.get('/events/strain', (req, res) => {
   if (!req.user || !req.user.isAuthenticated) {
     return res.sendStatus(401);
@@ -672,7 +672,7 @@ app.get('/events/strain', (req, res) => {
   strainEmitter.on('strain', send);
   
   // CLEANUP: When browser disconnects (tab closed, navigate away, etc.), remove the dead listener
-  // Prevents memory leaks - like unsubscribing from a mailing list when you move
+  // Prevents memory leaks. 
   req.on('close', () => strainEmitter.off('strain', send));
 });
 

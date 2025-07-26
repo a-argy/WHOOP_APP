@@ -1,19 +1,18 @@
 require('dotenv').config({ path: '../../.env' });
-const { Pool } = require('pg');
+const { createClient } = require('@supabase/supabase-js');
 const crypto = require('crypto');
 
 class TokenStorage {
   constructor() {
-    // Database connection - construct connection string with Aurora endpoint
-    const dbConfig = {
-      host: 'database-1.cwr0u4gow4li.us-east-1.rds.amazonaws.com',
-      port: 5432,
-      database: process.env.DB_NAME,
-      password: process.env.DB_PASSWORD,
-      ssl: true
-    };
-
-    this.pool = new Pool(dbConfig);
+    // Supabase client setup
+    const supabaseUrl = 'https://jhtmwfscdzijpcvvnvel.supabase.co';
+    const supabaseKey = process.env.SUPABASE_KEY;
+    
+    if (!supabaseKey) {
+      throw new Error('SUPABASE_KEY environment variable is required');
+    }
+    
+    this.supabase = createClient(supabaseUrl, supabaseKey);
     
     this.secret = process.env.SESSION_SECRET || crypto.randomBytes(32).toString('hex');
     this.algorithm = 'aes-256-gcm';
@@ -30,12 +29,6 @@ class TokenStorage {
     if (!this.CLIENT_SECRET) {
       throw new Error('CLIENT_SECRET environment variable is required');
     }
-    if (!process.env.DB_PASSWORD) {
-      throw new Error('DB_PASSWORD environment variable is required');
-    }
-    if (!process.env.DB_NAME) {
-      throw new Error('DB_NAME environment variable is required');
-    }
     
     // Initialize database table
     this.initDatabase();
@@ -43,15 +36,19 @@ class TokenStorage {
 
   async initDatabase() {
     try {
-      await this.pool.query(`
-        CREATE TABLE IF NOT EXISTS user_tokens (
-          user_id VARCHAR(255) PRIMARY KEY,
-          encrypted_data JSONB NOT NULL,
-        )
-      `);
-      console.log('Database initialized successfully');
+      // Check if table exists by trying to select from it
+      const { data, error } = await this.supabase
+        .from('user_tokens')
+        .select('user_id')
+        .limit(1);
+      
+      if (error) {
+        console.log('Database initialized');
+      } else {
+        console.log('✅ Database initialized successfully');
+      }
     } catch (error) {
-      console.error('Error initializing database:', error);
+      console.error('Error checking database:', error);
     }
   }
 
@@ -86,9 +83,17 @@ class TokenStorage {
 
   async getAll() {
     try {
-      const result = await this.pool.query('SELECT user_id, encrypted_data FROM user_tokens');
+      const { data, error } = await this.supabase
+        .from('user_tokens')
+        .select('user_id, encrypted_data');
+      
+      if (error) {
+        console.error('No tokens found');
+        return {};
+      }
+      
       const tokens = {};
-      result.rows.forEach(row => {
+      data.forEach(row => {
         tokens[row.user_id] = row.encrypted_data;
       });
       return tokens;
@@ -108,15 +113,30 @@ class TokenStorage {
       
       const encryptedData = this.encrypt(JSON.stringify(dataToEncrypt));
       
-      await this.pool.query(`
-        INSERT INTO user_tokens (user_id, encrypted_data)
-        VALUES ($1, $2)
-        ON CONFLICT (user_id) 
-        DO UPDATE SET encrypted_data = $2
-      `, [userId, encryptedData]);
+      const { error } = await this.supabase
+        .from('user_tokens')
+        .upsert({
+          user_id: userId,
+          encrypted_data: encryptedData,
+          updated_at: new Date().toISOString()
+        });
+      
+      if (error) {
+        console.error('Supabase error details:', {
+          code: error.code,
+          message: error.message,
+          details: error.details,
+          hint: error.hint
+        });
+        throw error;
+      }
       
     } catch (error) {
-      console.error('Error saving tokens:', error);
+      console.error('Error saving tokens:', {
+        message: error.message,
+        code: error.code,
+        details: error.details
+      });
       throw error;
     }
   }
@@ -190,14 +210,33 @@ class TokenStorage {
    */
   async getRaw(userId) {
     try {
-      const result = await this.pool.query('SELECT encrypted_data FROM user_tokens WHERE user_id = $1', [userId]);
-      if (result.rows.length === 0) {
-        return null;
+      const { data, error } = await this.supabase
+        .from('user_tokens')
+        .select('encrypted_data')
+        .eq('user_id', userId)
+        .single();
+      
+      if (error) {
+        if (error.code === 'PGRST116') {
+          // No rows found
+          return null;
+        }
+        console.error('Supabase error in getRaw:', {
+          code: error.code,
+          message: error.message,
+          details: error.details
+        });
+        throw error;
       }
-      const decryptedData = this.decrypt(result.rows[0].encrypted_data);
+      
+      const decryptedData = this.decrypt(data.encrypted_data);
       return JSON.parse(decryptedData);
     } catch (error) {
-      console.error('Error getting raw tokens:', error);
+      console.error('Error getting raw tokens:', {
+        message: error.message,
+        code: error.code,
+        userId: userId
+      });
       return null;
     }
   }
@@ -229,25 +268,19 @@ class TokenStorage {
 
   async delete(userId) {
     try {
-      await this.pool.query('DELETE FROM user_tokens WHERE user_id = $1', [userId]);
+      const { error } = await this.supabase
+        .from('user_tokens')
+        .delete()
+        .eq('user_id', userId);
+      
+      if (error) {
+        throw error;
+      }
+      
       console.log(`Tokens deleted for user: ${userId}`);
     } catch (error) {
       console.error('Error deleting tokens:', error);
       throw error;
-    }
-  }
-
-  async cleanup() {
-    try {
-      // Remove expired tokens that can't be refreshed (older than 7 days)
-      const sevenDaysAgo = Date.now() - (7 * 24 * 60 * 60 * 1000);
-      await this.pool.query(`
-        DELETE FROM user_tokens 
-        WHERE (encrypted_data->>'expiresAt')::bigint < $1
-      `, [sevenDaysAgo]);
-      console.log('Token storage cleaned up');
-    } catch (error) {
-      console.error('Error cleaning up tokens:', error);
     }
   }
 }
