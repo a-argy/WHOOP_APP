@@ -23,6 +23,15 @@ const CLIENT_SECRET = process.env.CLIENT_SECRET;
 const SESSION_SECRET = process.env.SESSION_SECRET || crypto.randomBytes(32).toString('hex');
 const PORT = process.env.PORT || 3000;
 
+
+// Validate required environment variables
+if (!CLIENT_ID) {
+  throw new Error('CLIENT_ID environment variable is required');
+}
+if (!CLIENT_SECRET) {
+  throw new Error('CLIENT_SECRET environment variable is required');
+}
+
 // Add body-parser that also keeps a copy of the raw body so we can verify
 // WHOOP webhook signatures (they require the exact byte-for-byte payload).
 app.use(express.json({
@@ -32,14 +41,6 @@ app.use(express.json({
     req.rawBody = buf;
   }
 }));
-
-// Validate required environment variables
-if (!CLIENT_ID) {
-  throw new Error('CLIENT_ID environment variable is required');
-}
-if (!CLIENT_SECRET) {
-  throw new Error('CLIENT_SECRET environment variable is required');
-}
 
 // -----------------------------------------------------------------------------
 // SESSION MIDDLEWARE  (express-session + session-file-store)
@@ -695,7 +696,17 @@ app.post('/settings/strain-polling', async (req, res) => {
     return res.status(400).json({ error: 'enabled boolean required' });
   }
   const newState = enabled;
-  await tokenStorage.set(req.user.userId, { strainPollingEnabled: newState });
+  
+  // Get existing token data and update strain polling setting
+  const existingTokens = await tokenStorage.getRaw(req.user.userId);
+  if (!existingTokens) {
+    return res.status(401).json({ error: 'No tokens found - please re-authenticate' });
+  }
+  
+  await tokenStorage.set(req.user.userId, {
+    ...existingTokens,
+    strainPollingEnabled: newState
+  });
 
   // Update per-user background worker
   if (newState) {
@@ -758,18 +769,24 @@ app.listen(PORT, () => {
       const enabledUsers = [];
       for (const [uid, enc] of Object.entries(allTokens)) {
         try {
-          console.log(`🔓 Attempting to decrypt token for user ${uid}`);
-          const decrypted = JSON.parse(tokenStorage.decrypt(enc));
-          console.log(`✅ Successfully decrypted token for user ${uid}`);
-          console.log(`⚙️  strainPollingEnabled: ${decrypted.strainPollingEnabled}`);
-          console.log(`🕒 Token expires at: ${new Date(decrypted.expiresAt).toISOString()}`);
+          console.log(`🔓 Attempting to get token for user ${uid}`);
+          // Use tokenStorage.get() instead of direct decryption to handle refresh
+          const tokenData = await tokenStorage.get(uid);
           
-          if (decrypted.strainPollingEnabled) {
-            enabledUsers.push(uid);
-            console.log(`✨ Added user ${uid} to enabled users list`);
+          if (tokenData) {
+            console.log(`✅ Successfully got token for user ${uid}`);
+            console.log(`⚙️  strainPollingEnabled: ${tokenData.strainPollingEnabled}`);
+            console.log(`🕒 Token expires at: ${new Date(tokenData.expiresAt).toISOString()}`);
+            
+            if (tokenData.strainPollingEnabled) {
+              enabledUsers.push(uid);
+              console.log(`✨ Added user ${uid} to enabled users list`);
+            }
+          } else {
+            console.log(`❌ No valid token found for user ${uid}`);
           }
         } catch (error) {
-          console.error(`❌ Failed to decrypt token for user ${uid}:`, error.message);
+          console.error(`❌ Failed to get token for user ${uid}:`, error.message);
         }
       }
       strainManager.bootstrap(enabledUsers);

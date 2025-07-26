@@ -1,11 +1,20 @@
 require('dotenv').config({ path: '../../.env' });
-const fs = require('fs-extra');
-const path = require('path');
+const { Pool } = require('pg');
 const crypto = require('crypto');
 
 class TokenStorage {
   constructor() {
-    this.tokensFile = path.join(__dirname, '../data/tokens.json');
+    // Database connection - construct connection string with Aurora endpoint
+    const dbConfig = {
+      host: 'database-1.cwr0u4gow4li.us-east-1.rds.amazonaws.com',
+      port: 5432,
+      database: process.env.DB_NAME,
+      password: process.env.DB_PASSWORD,
+      ssl: true
+    };
+
+    this.pool = new Pool(dbConfig);
+    
     this.secret = process.env.SESSION_SECRET || crypto.randomBytes(32).toString('hex');
     this.algorithm = 'aes-256-gcm';
     
@@ -20,6 +29,29 @@ class TokenStorage {
     }
     if (!this.CLIENT_SECRET) {
       throw new Error('CLIENT_SECRET environment variable is required');
+    }
+    if (!process.env.DB_PASSWORD) {
+      throw new Error('DB_PASSWORD environment variable is required');
+    }
+    if (!process.env.DB_NAME) {
+      throw new Error('DB_NAME environment variable is required');
+    }
+    
+    // Initialize database table
+    this.initDatabase();
+  }
+
+  async initDatabase() {
+    try {
+      await this.pool.query(`
+        CREATE TABLE IF NOT EXISTS user_tokens (
+          user_id VARCHAR(255) PRIMARY KEY,
+          encrypted_data JSONB NOT NULL,
+        )
+      `);
+      console.log('Database initialized successfully');
+    } catch (error) {
+      console.error('Error initializing database:', error);
     }
   }
 
@@ -54,34 +86,35 @@ class TokenStorage {
 
   async getAll() {
     try {
-      const exists = await fs.pathExists(this.tokensFile);
-      if (!exists) {
-        return {};
-      }
-      return await fs.readJson(this.tokensFile);
+      const result = await this.pool.query('SELECT user_id, encrypted_data FROM user_tokens');
+      const tokens = {};
+      result.rows.forEach(row => {
+        tokens[row.user_id] = row.encrypted_data;
+      });
+      return tokens;
     } catch (error) {
-      console.error('Error reading tokens file:', error);
+      console.error('Error reading tokens from database:', error);
       return {};
     }
   }
   
   async set(userId, tokenData) {
     try {
-      // First get and merge with existing data if it exists
-      const existing = await this.getRaw(userId) || {};
-      const mergedData = { ...existing, ...tokenData };
-      
       const dataToEncrypt = {
-        ...mergedData,
+        ...tokenData,
         updatedAt: new Date().toISOString(),
-        expiresAt: mergedData.expiresAt || (Date.now() + (1000 * 60 * 60 * 24)) 
+        expiresAt: tokenData.expiresAt || (Date.now() + (1000 * 60 * 60 * 24)) 
       };
       
-      const tokens = await this.getAll();
       const encryptedData = this.encrypt(JSON.stringify(dataToEncrypt));
-      tokens[userId] = encryptedData;
-
-      await fs.writeJson(this.tokensFile, tokens, { spaces: 2 });
+      
+      await this.pool.query(`
+        INSERT INTO user_tokens (user_id, encrypted_data)
+        VALUES ($1, $2)
+        ON CONFLICT (user_id) 
+        DO UPDATE SET encrypted_data = $2
+      `, [userId, encryptedData]);
+      
     } catch (error) {
       console.error('Error saving tokens:', error);
       throw error;
@@ -98,40 +131,48 @@ class TokenStorage {
     try {
       console.log(`Token expired for user ${userId}, refreshing...`);
       
+      const body = new URLSearchParams({
+        grant_type: 'refresh_token',
+        client_id: this.CLIENT_ID,
+        client_secret: this.CLIENT_SECRET,
+        scope: 'offline',
+        refresh_token: tokenData.refreshToken,
+      });
+
+      const headers = {
+        'Content-Type': 'application/x-www-form-urlencoded',
+      };
+
       const response = await fetch(`${this.WHOOP_API_HOSTNAME}/oauth/oauth2/token`, {
+        body,
+        headers,
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/x-www-form-urlencoded',
-        },
-        body: new URLSearchParams({
-          grant_type: 'refresh_token',
-          refresh_token: tokenData.refreshToken,
-          client_id: this.CLIENT_ID,
-          client_secret: this.CLIENT_SECRET,
-          scope: 'offline'
-        })
       });
 
       if (!response.ok) {
         const errorText = await response.text();
+        console.error(`Token refresh failed for user ${userId}:`, {
+          status: response.status,
+          error: errorText,
+          refreshToken: tokenData.refreshToken ? '[PRESENT]' : '[MISSING]'
+        });
         throw new Error(`Token refresh failed: ${response.status} - ${errorText}`);
       }
 
       const data = await response.json();
       
-      // Prepare refreshed token data
+      // Prepare refreshed token data (removed refreshedAt as requested)
       const refreshedTokenData = {
         ...tokenData, // Preserve other data like strainPollingEnabled
         accessToken: data.access_token,
         refreshToken: data.refresh_token,
-        expiresAt: Date.now() + data.expires_in * 1000,
-        refreshedAt: new Date().toISOString()
+        expiresAt: Date.now() + data.expires_in * 1000
       };
 
       // Save refreshed tokens
       await this.set(userId, refreshedTokenData);
 
-      console.log(`Token refreshed successfully for user ${userId}`);
+      console.log(`Token refreshed successfully for user ${userId}, new expiry: ${new Date(refreshedTokenData.expiresAt).toISOString()}`);
       return refreshedTokenData;
       
     } catch (error) {
@@ -149,12 +190,11 @@ class TokenStorage {
    */
   async getRaw(userId) {
     try {
-      const tokens = await this.getAll();
-      const encryptedData = tokens[userId];
-      if (!encryptedData) {
+      const result = await this.pool.query('SELECT encrypted_data FROM user_tokens WHERE user_id = $1', [userId]);
+      if (result.rows.length === 0) {
         return null;
       }
-      const decryptedData = this.decrypt(encryptedData);
+      const decryptedData = this.decrypt(result.rows[0].encrypted_data);
       return JSON.parse(decryptedData);
     } catch (error) {
       console.error('Error getting raw tokens:', error);
@@ -189,9 +229,7 @@ class TokenStorage {
 
   async delete(userId) {
     try {
-      const tokens = await this.getAll();
-      delete tokens[userId];
-      await fs.writeJson(this.tokensFile, tokens, { spaces: 2 });
+      await this.pool.query('DELETE FROM user_tokens WHERE user_id = $1', [userId]);
       console.log(`Tokens deleted for user: ${userId}`);
     } catch (error) {
       console.error('Error deleting tokens:', error);
@@ -201,19 +239,12 @@ class TokenStorage {
 
   async cleanup() {
     try {
-      const tokens = await this.getAll();
-      for (const [userId, encryptedData] of Object.entries(tokens)) {
-        try {
-          const decryptedData = this.decrypt(encryptedData);
-          const tokenData = JSON.parse(decryptedData);
-          delete tokens[userId];
-        } catch (error) {
-          console.error(`Error processing token for user ${userId}:`, error);
-          delete tokens[userId];
-        }
-      }
-
-      await fs.writeJson(this.tokensFile, tokens, { spaces: 2 });
+      // Remove expired tokens that can't be refreshed (older than 7 days)
+      const sevenDaysAgo = Date.now() - (7 * 24 * 60 * 60 * 1000);
+      await this.pool.query(`
+        DELETE FROM user_tokens 
+        WHERE (encrypted_data->>'expiresAt')::bigint < $1
+      `, [sevenDaysAgo]);
       console.log('Token storage cleaned up');
     } catch (error) {
       console.error('Error cleaning up tokens:', error);
